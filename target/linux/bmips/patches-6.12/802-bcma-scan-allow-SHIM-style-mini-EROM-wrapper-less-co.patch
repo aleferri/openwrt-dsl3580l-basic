@@ -1,0 +1,57 @@
+From 2c4a6e7b3a1b0ba4de9e138eec46ceec146a68ce Mon Sep 17 00:00:00 2001
+From: Alessio Ferri <alessio.ferri@mythread.it>
+Date: Mon, 18 May 2026 19:26:03 +0000
+Subject: [PATCH RFC v2 2/2] bcma: scan: allow SHIM-style mini-EROM
+ wrapper-less cores
+
+bcma_get_next_core() rejects with -ENXIO any component whose
+component_B descriptor reports NMW=NSW=0 unless its core id is in
+a short allowlist (4706 MAC GBIT, NS_CHIPCOMMON_B, PMU, GCI).
+
+On SoCs that publish a SHIM-style mini-EROM (BMIPS xDSL family:
+BCM6362, BCM63268), the WLAN backplane lists three components:
+ChipCommon, IEEE 802.11 and BCMA_CORE_SHIM. None of the three is
+in the existing allowlist, so all three are skipped silently,
+bus->cores stays empty, bcma_find_core(BCMA_CORE_CHIPCOMMON)
+returns NULL, and a later bcma_chipco_watchdog_register()
+dereferences cc->core->bus on its first line and oopses mid-probe.
+
+BCMA_CORE_SHIM (0x837) is already defined in
+include/linux/bcma/bcma.h with the in-tree comment "SHIM
+component in ubus/6362"; this patch is what makes the SHIM core
+actually probe and bind.
+
+Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
+---
+ drivers/bcma/scan.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/bcma/scan.c b/drivers/bcma/scan.c
+index 983a62d..871baa2 100644
+--- a/drivers/bcma/scan.c
++++ b/drivers/bcma/scan.c
+@@ -318,6 +318,21 @@ static int bcma_get_next_core(struct bcma_bus *bus, u32 __iomem **eromptr,
+ 		case BCMA_CORE_GCI:
+ 		/* Not used yet: case BCMA_CORE_OOB_ROUTER: */
+ 			break;
++		case BCMA_CORE_CHIPCOMMON:
++		case BCMA_CORE_80211:
++		case BCMA_CORE_SHIM:
++			/* SHIM-style mini-EROM SoCs publish CHIPCOMMON, the IEEE
++			 * 802.11 core and the SHIM core itself with NMW=NSW=0
++			 * because clock and reset gating happens at the SoC level
++			 * via the SHIM, not via per-core DMP wrappers. The
++			 * companion host_soc patch sets bus->shim_attached on
++			 * those SoCs from per-compatible quirks data; the strict
++			 * NMW=NSW=0 rejection still applies to PCI-attached cards
++			 * and to SoCs without that quirk.
++			 */
++			if (bus->shim_attached)
++				break;
++			fallthrough;
+ 		default:
+ 			bcma_erom_skip_component(bus, eromptr);
+ 			return -ENXIO;
+-- 
+2.43.0
+

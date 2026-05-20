@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: Alessio Ferri <alessio.ferri@mythread.it>
+Date: Mon, 18 May 2026 12:00:00 +0000
+Subject: [PATCH] drivers: bus: add BCM6362 on-chip WLAN SHIM driver
+
+The BCM6362 SoC has an integrated 2.4 GHz WLAN block on a Broadcom
+AMBA (AXI/OCP) backplane gated by a small SHIM bridge sitting on the
+SoC's ubus at 0x10007000. CFE does not bring this block up; the SHIM
+needs clock + reset + a register dance (SHIM_MISC, SHIM_MAC_CONTROL)
+matching the OEM "Enable WOC" sequence before the backplane behind it
+is enumerable.
+
+The driver lives in drivers/bus/bcm6362-wlan-shim.c (shipped via
+target/linux/bmips/files/drivers/bus/). It owns nothing of the
+backplane itself: it brings up the SHIM, then lets of_platform_populate
+hand the brcm,bus-axi child to the in-tree bcma host_soc.c, which
+enumerates ChipCommon, the 802.11 core and BCMA_CORE_SHIM and lets
+b43 bind as a regular bcma device.
+
+Hook the driver into drivers/bus/{Kconfig,Makefile}.
+
+Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
+---
+ drivers/bus/Kconfig  | 11 +++++++++++
+ drivers/bus/Makefile |  1 +
+ 2 files changed, 12 insertions(+)
+
+--- a/drivers/bus/Kconfig
++++ b/drivers/bus/Kconfig
+@@ -41,6 +41,17 @@ config BT1_APB
+ 	  Currently the driver provides a way to detect any unsupported
+ 	  Baikal-T1 APB transactions.
+ 
++config BCM6362_WLAN_SHIM
++	tristate "BCM6362 on-chip WLAN SHIM bridge"
++	depends on BMIPS_GENERIC || COMPILE_TEST
++	depends on OF
++	select BCMA
++	select BCMA_HOST_SOC
++	help
++	  Bring-up driver for the SHIM bridge that gates the integrated
++	  2.4 GHz WLAN block of the BCM6362 SoC. Once the SHIM is up the
++	  driver instantiates a brcm,bus-axi child probed by bcma.
++
+ config BT1_AXI
+ 	bool "Baikal-T1 AXI-bus driver"
+ 	depends on MIPS_BAIKAL_T1 || COMPILE_TEST
+--- a/drivers/bus/Makefile
++++ b/drivers/bus/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_MOXTET)		+= moxtet.o
+ # DPAA2 fsl-mc bus
+ obj-$(CONFIG_FSL_MC_BUS)	+= fsl-mc/
+ 
++obj-$(CONFIG_BCM6362_WLAN_SHIM)	+= bcm6362-wlan-shim.o
+ obj-$(CONFIG_BT1_APB)		+= bt1-apb.o
+ obj-$(CONFIG_BT1_AXI)		+= bt1-axi.o
+ obj-$(CONFIG_IMX_WEIM)		+= imx-weim.o

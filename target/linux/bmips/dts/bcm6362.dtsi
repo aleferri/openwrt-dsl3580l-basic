@@ -70,6 +70,7 @@
 
 	cpu_intc: interrupt-controller {
 		#address-cells = <0>;
+		/* address-cells is probably wrong, why is it here? */
 		compatible = "mti,cpu-interrupt-controller";
 
 		interrupt-controller;
@@ -494,6 +495,80 @@
 			resets = <&periph_rst BCM6362_RST_IPSEC>;
 
 			power-domains = <&periph_pwr BCM6362_POWER_DOMAIN_IPSEC>;
+		};
+
+		/*
+		 * Integrated 2.4 GHz WLAN.
+		 *
+		 * The radio sits on a Broadcom AMBA (AXI/OCP) backplane
+		 * — the same kind bcma calls "brcm,bus-axi" — gated by
+		 * a small SHIM bridge on the SoC ubus:
+		 *
+		 *   ubus  ─►  WLAN SHIM  ─►  AXI backplane  ┬─► ChipCommon @ 0x10004000
+		 *             @ 0x10007000                  └─► d11 MAC @ 0x10005000
+		 *
+		 * The 'wlan' node is the SHIM (parent platform device,
+		 * driven by bcm6362-wlan-shim) — owns clock, resets,
+		 * power-domain, and the bring-up sequence CFE skips.
+		 *
+		 * Its child 'axi@10004000' is the bcma backplane —
+		 * standard "brcm,bus-axi" probed by drivers/bcma/
+		 * host_soc.c, which enumerates the 802.11 core and lets
+		 * b43 bind to it as a normal bcma device.
+		 *
+		 * Expected Hardware identifiers:
+		 *   chipnum 0x6362, chiprev 0x1, corerev 0x16 (d11 rev 22),
+		 *   radio 2057 (N-PHY family 43226).
+		 *
+		 * Bring-up sequence: need quirk-enabled bcma.
+		 */
+		wlan: wlan@10007000 {
+			compatible = "brcm,bcm6362-wlan";
+			reg = <0x10007000 0x100>;
+			reg-names = "shim";
+
+			clocks = <&periph_clk BCM6362_CLK_WLAN_OCP>;
+			resets = <&periph_rst BCM6362_RST_WLAN_SHIM>,
+				 <&periph_rst BCM6362_RST_WLAN_UBUS>;
+			reset-names = "shim", "shim-ubus";
+			power-domains = <&periph_pwr BCM6362_POWER_DOMAIN_WLAN_PADS>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
+
+			status = "disabled";
+
+			/* bcma backplane — probed by drivers/bcma/host_soc.c.
+			 * 'reg' points at ChipCommon; bcma scans the bus from
+			 * there and picks up the 802.11 core at +0x1000. */
+			axi@10004000 {
+				/*
+				 * Specific compatible drives the host_soc
+				 * quirks lookup (BE accessors + SHIM-style
+				 * wrapper-less core allowlist); the generic
+				 * one is the fallback that mainline matches.
+				 *
+				 * The WLAN backplane need to be accessed as big-endian
+				 * peripheral. Un-quirked bcma byte-swap on
+				 * BE MIPS CPUs;
+				 */
+				compatible = "brcm,bcm6362-bus-axi",
+					     "brcm,bus-axi";
+				reg = <0x10004000 0x1000>;
+				ranges = <0x00000000 0x10004000 0x00002000>;
+
+				#address-cells = <1>;
+				#size-cells = <1>;
+				#interrupt-cells = <1>;
+
+				/* The 802.11 core sits at +0x1000 from the
+				 * ChipCommon base, i.e. 0x10005000. interrupt-
+				 * map is keyed on the low bits of it's absolute address. */
+				interrupt-map-mask = <0x000fffff 0xffff>;
+				interrupt-map = <0x00005000 0
+						 &periph_intc 0 BCM6362_IRQ_WLAN>;
+			};
 		};
 
 		ethernet: ethernet@1000d800 {

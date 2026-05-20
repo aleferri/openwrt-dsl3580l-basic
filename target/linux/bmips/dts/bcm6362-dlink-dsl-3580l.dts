@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "bcm6362.dtsi"
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "D-Link DSL-3580L";
+	compatible = "dlink,dsl-3580l", "brcm,bcm6362";
+
+	aliases {
+		led-boot = &led_power_green;
+		led-failsafe = &led_power_red;
+		led-running = &led_power_green;
+		led-upgrade = &led_power_green;
+	};
+
+	/* 64 MB DDR */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x04000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		/*
+		 * The four front-panel buttons of the DSL-3580L are wired to
+		 * the four GPIO pads that the SoC also exposes as the
+		 * ext_irq0..3 alternate function inputs of the external
+		 * interrupt controller (brcm,bcm6345-ext-intc). That gives
+		 * us IRQ-driven keys instead of the 100ms polling we used
+		 * before.
+		 *
+		 * No pinctrl-0 = <&pinctrl_ext_irqN> here on purpose: on
+		 * BCM63xx the pad input buffer feeds both the GPIO data
+		 * register and the ExtINT input lines in parallel, so the
+		 * pad stays readable via gpiod_get_value() (which
+		 * gpio-keys.c uses to fill the press/release state) AND
+		 * the ExtINT controller sees transitions without the pin
+		 * being switched out of GPIO mode. If this assumption ever
+		 * turns out wrong on a specific silicon revision and IRQs
+		 * never fire, add the pinctrl groups to the corresponding
+		 * key node and switch its interrupts to
+		 * IRQ_TYPE_EDGE_FALLING (gpiod_get_value() would then
+		 * return 0 in alt-mux mode, so EDGE_BOTH would mis-report
+		 * release events).
+		 *
+		 * debounce-interval is kept at 60ms for documentation:
+		 * gpio-keys passes it to gpiod_set_debounce() which is a
+		 * no-op on BCM63xx (no hardware debounce). If the buttons
+		 * bounce, software debounce can be added userspace-side or
+		 * by switching to the gpio-keys built-in hrtimer path.
+		 */
+
+		reset {
+			label = "reset";
+			gpios = <&gpio 24 GPIO_ACTIVE_LOW>;
+			interrupt-parent = <&ext_intc>;
+			interrupts = <0 IRQ_TYPE_EDGE_BOTH>;
+			linux,code = <KEY_RESTART>;
+			debounce-interval = <60>;
+		};
+
+		wps {
+			label = "wps";
+			gpios = <&gpio 25 GPIO_ACTIVE_LOW>;
+			interrupt-parent = <&ext_intc>;
+			interrupts = <1 IRQ_TYPE_EDGE_BOTH>;
+			linux,code = <KEY_WPS_BUTTON>;
+			debounce-interval = <60>;
+		};
+
+		wlan_5g {
+			label = "wlan_5g";
+			gpios = <&gpio 26 GPIO_ACTIVE_LOW>;
+			interrupt-parent = <&ext_intc>;
+			interrupts = <2 IRQ_TYPE_EDGE_BOTH>;
+			linux,code = <KEY_RFKILL>;
+			debounce-interval = <60>;
+		};
+
+		wlan_2g {
+			label = "wlan_2g";
+			gpios = <&gpio 27 GPIO_ACTIVE_LOW>;
+			interrupt-parent = <&ext_intc>;
+			interrupts = <3 IRQ_TYPE_EDGE_BOTH>;
+			linux,code = <KEY_WLAN>;
+			debounce-interval = <60>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * Lo stock CFE muxa GPIO 0 sulla funzione hardware
+		 * "usb_device_led" del SoC (vedi BP_GPIO_FUNC nei
+		 * boardparms). Qui lo trattiamo come GPIO normale,
+		 * perdiamo l'auto-blink hardware ma OpenWrt puo' usare
+		 * il trigger usbport.
+		 */
+		led-0 {
+			function = LED_FUNCTION_USB;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 0 GPIO_ACTIVE_LOW>;
+			trigger-sources = <&ehci_port1>, <&ohci_port1>;
+			linux,default-trigger = "usbport";
+		};
+
+		led-1 {
+			function = LED_FUNCTION_WPS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 1 GPIO_ACTIVE_LOW>;
+		};
+
+		led_power_green: led-12 {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 12 GPIO_ACTIVE_LOW>;
+		};
+
+		led_power_red: led-13 {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_RED>;
+			gpios = <&gpio 13 GPIO_ACTIVE_LOW>;
+			panic-indicator;
+		};
+
+		led-14 {
+			label = "green:dsl";
+			gpios = <&gpio 14 GPIO_ACTIVE_LOW>;
+		};
+
+		led-16 {
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_RED>;
+			gpios = <&gpio 16 GPIO_ACTIVE_LOW>;
+		};
+
+		led-17 {
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 17 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	/*
+	 * SPROM fallback per il radio 2.4 GHz integrato nel BCM6362
+	 * (chip 14e4:435f). Blob sromrev 8 board-specific (440 byte)
+	 * generato dal `wl -i wl0 srdump` di una DSL-3580L con
+	 * srdump_to_bin.py. Le calibrazioni PA chain 0/1 e i power
+	 * offset MCS/CCK/OFDM differiscono dal blob generico
+	 * `brcm/bcm6362-sprom.bin`; vedi diff_to_fixups.py per i 37
+	 * word board-specific.
+	 *
+	 * Il radio integrato non e' su PCIe — sta sul backplane bcma
+	 * AXI/OCP del SoC, esposto dal driver bcm6362-wlan-shim
+	 * (vedi nodo &wlan in bcm6362.dtsi). Il match della SPROM
+	 * avviene per phandle (bcma-bus = <&wlan>), non per
+	 * pci-bus/pci-dev. Vedi l'estensione SoC in
+	 * target/linux/generic/files/drivers/bcma/fallback-sprom.c.
+	 *
+	 * dev_id fixup (word 0x30 = byte 0x60).
+	 *
+	 * Anomalia nota: il blob estratto dal silicon via srdump
+	 * riporta dev_id = 0x4354 nella parola 48 della SPROM,
+	 * mentre il dmesg dello stock OEM su questa stessa board
+	 * riporta `deviceid 0x435f` — quindi 0x435f e' il valore
+	 * con cui il chip si presenta al wireless stack in
+	 * produzione. Il blob va riallineato in memoria a 0x435f
+	 * via il meccanismo brcm,sprom-fixups gia' presente in
+	 * fallback-sprom.c (riga 377+); il blob su filesystem
+	 * resta intatto (e' il dump fedele dell'OTP del chip).
+	 *
+	 * Questa discrepanza non emergeva sotto il vecchio path
+	 * fake-PCI: il config space sintetico hard-coda 0x435f e
+	 * b43 lo legge da li' senza passare per la SPROM. Sotto
+	 * bcma host-soc b43 legge bus_sprom->dev_id e va il fixup.
+	 *
+	 * b43 conosce 0x435f (BCM6362) in main.c:5328.
+	 *
+	 * Il blob va in /lib/firmware/brcm/bcm6362-dlink-dsl-3580l-sprom.bin
+	 * via base-files del subtarget bcm6362.
+	 */
+	bcm6362-sprom {
+		compatible = "brcm,bcma-sprom";
+
+		bcma-bus = <&wlan>;
+
+		nvmem-cells = <&macaddr_cfe_6a0 1>;
+		nvmem-cell-names = "mac-address";
+
+		brcm,sprom = "brcm/bcm6362-dlink-dsl-3580l-sprom.bin";
+		brcm,sprom-fixups = <0x30 0x435f>;
+	};
+
+	/*
+	 * SPROM fallback per il radio 5 GHz BCM4352 (chip 14e4:43b3)
+	 * su PCIe. Blob sromrev 11 board-specific (468 byte) estratto
+	 * da `wl -i wl1 srdump` con srdump_to_bin.py.
+	 *
+	 * Topologia PCI sotto OpenWrt mainline: il BCM4352 e' l'unico
+	 * device su PCIe (controller pcie-bcm6328); il radio integrato
+	 * NON e' enumerato come PCI ma come device bcma sul SoC
+	 * backplane (vedi bcm6362-sprom sopra).
+	 *
+	 *   bus 0:00.0  [14e4:6362]  PCIe Root Port (pcie-bcm6328)
+	 *   bus 1:00.0  [14e4:43b3]  BCM4352 (5 GHz)              <- questo nodo
+	 *
+	 * Il blob va installato in:
+	 *   /lib/firmware/brcm/bcm4352-dlink-dsl-3580l-sprom.bin
+	 * via base-files del subtarget bcm6362.
+	 *
+	 * Dipendenza kernel: la patch SROM rev 11 (estrattore
+	 * `bcma_sprom_extract_r11` + estensione di `struct ssb_sprom`
+	 * con i campi rev-11-only) deve essere applicata sul kernel
+	 * di OpenWrt. Vedi target/linux/bmips/patches-6.12/
+	 * 801-ssb-bcma-firmware-SROM-revision-11-support.patch.
+	 */
+	bcm4352-sprom {
+		compatible = "brcm,bcma-sprom";
+
+		pci-bus = <1>;
+		pci-dev = <0>;
+
+		nvmem-cells = <&macaddr_cfe_6a0 2>;
+		nvmem-cell-names = "mac-address";
+
+		brcm,sprom = "brcm/bcm4352-dlink-dsl-3580l-sprom.bin";
+	};
+};
+
+&ehci {
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ehci_port1: port@1 {
+		reg = <1>;
+		#trigger-source-cells = <0>;
+	};
+};
+
+&ethernet {
+	status = "okay";
+
+	nvmem-cells = <&macaddr_cfe_6a0 0>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * Switch esterno BCM53125. Il Makefile GPL riportava
+ *   BRCM_EXT_SWITCH_TYPE=53115, BRCM_EXT_SWITCH_REV="a0"
+ * ma quello e' il nome del driver MDK Broadcom riusato, non
+ * il chip ID. Il dump CFE/kernel stock dice esplicitamente:
+ *   External switch id = 53125
+ *   Note: Forcing 53115 driver for 53125
+ * In b53 mainline 53115 e 53125 sono compatible distinti.
+ * Attaccato a lsspi CS=2 (boardparms:
+ *   BP_OVERLAY_SPI_SSB2_EXT_CS + BP_ENET_CONFIG_SPI_SSB_2).
+ *
+ * Mapping etichette dal boardparms:
+ *   port 0  -> eth0  -> WAN
+ *   port 1  -> eth4  -> LAN4
+ *   port 2  -> eth3  -> LAN3
+ *   port 3  -> eth2  -> LAN2
+ *   port 4  -> eth1  -> LAN1
+ */
+&lsspi {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_spi_cs2>;
+
+	switch@2 {
+		compatible = "brcm,bcm53125";
+		reg = <2>;
+		spi-max-frequency = <781000>;
+
+		dsa,member = <1 0>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				label = "wan";
+			};
+
+			port@1 {
+				reg = <1>;
+				label = "lan4";
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan3";
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan2";
+			};
+
+			port@4 {
+				reg = <4>;
+				label = "lan1";
+			};
+
+			port@8 {
+				reg = <8>;
+
+				phy-mode = "rgmii-id";
+				ethernet = <&switch0port4>;
+
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
+};
+
+/*
+ * Flash SPI-NOR MX25L128 da 16 MB single-bank (confermato dal
+ * dump dei log stock: "HS Serial flash device: name MX25L128,
+ * id 0xc218 size 16384KB"). Niente dual-bank / niente fallback
+ * automatico in caso di flash interrotta — il recovery va fatto
+ * via TFTP da CFE seriale.
+ *
+ * Layout SPI (frequency, bus-width) copiato dal Comtrend
+ * AR-5381u / Innacomm W3400v6 (stesso target bmips, stesso uso
+ * di brcm,bcm963xx-imagetag). Da abbassare se la flash della
+ * board specifica non li tollera (sintomi: corruption / hang
+ * in lettura): togliere le due righe spi-*-bus-width e portare
+ * spi-max-frequency a 10000000 o 8000000.
+ */
+&hsspi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <16666667>;
+		spi-tx-bus-width = <2>;
+		spi-rx-bus-width = <2>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				reg = <0x000000 0x010000>;
+				label = "cfe";
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					/*
+					 * Offset MAC base 0x6a0 e' il default
+					 * Broadcom CFE (= NVRAM_DATA_OFFSET
+					 * 0x580 + offset di ucaBaseMacAddr
+					 * dentro la struct nvram, 0x120).
+					 *
+					 * Convenzione MAC indice -> interfaccia
+					 * sullo stock D-Link DSL-3580L (verificata
+					 * dal `ifconfig -a` del firmware OEM
+					 * 6.30.102.7, salvato in
+					 * router-data/dsl3580l/router_info.txt
+					 * del repo b43-add-bcm43xx-ac):
+					 *
+					 *   base + 0  ->  D8:FE:E3:E2:A1:3C
+					 *                 LAN/bridge (bcmsw, br0,
+					 *                 eth1..eth4 lato switch)
+					 *   base + 1  ->  D8:FE:E3:E2:A1:3D
+					 *                 wl0 (2.4 GHz N-PHY)
+					 *   base + 2  ->  D8:FE:E3:E2:A1:3E
+					 *                 wl1 (5 GHz AC-PHY)
+					 *   base + 3  ->  D8:FE:E3:E2:A1:3F
+					 *                 WAN dedicato (eth0)
+					 */
+					macaddr_cfe_6a0: macaddr@6a0 {
+						compatible = "mac-base";
+						reg = <0x6a0 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+
+			/*
+			 * 7.5 MB rootfs + 1.4 MB kernel,
+			 * rootfs first in the original firmware.
+			 */
+			partition@10000 {
+				compatible = "brcm,bcm963xx-imagetag";
+				reg = <0x010000 0x8b0000>;
+				label = "firmware";
+			};
+
+			/*
+			 * psi_marker: 0x8c5000 - 0x8d5000 (64 KiB).
+			 * Settore con 13 byte di sentinella all'inizio
+			 * (35 ea 91 b4 92 23 be 73 98 e4 bd 5a 9a) seguiti
+			 * da FF. Probabilmente un boundary marker letto
+			 * dal CFE per validare l'integrita' della factory
+			 * image o per delimitare l'area scratch sottostante.
+			 * Read-only per non rischiare di alterarlo.
+			 */
+			partition@8c5000 {
+				reg = <0x8c0000 0x010000>;
+				label = "psi_marker";
+				read-only;
+			};
+
+			/*
+			 * scratch: 0x8d5000 - 0xff5000 (7296 KiB).
+			 * Settori erased (0xff) nella flash stock, mai
+			 * scritti dall'OEM. Esposti scrivibili: utili come
+			 * area utente per dump, log persistenti, secondo
+			 * overlay, o estensione futura di firmware/rootfs.
+			 */
+			/* Start bumped from 0x8d5000 to 0x8e0000 (next erase-block
+			 * boundary, 64 KiB) so mtd doesn't force read-only on a
+			 * misaligned offset. Loses 44 KiB of scratch space at the
+			 * front; remaining 7.2 MiB is plenty for the intended use
+			 * (dumps, persistent logs, secondary overlay). */
+			partition@8e0000 {
+				reg = <0x8e0000 0x715000>;
+				label = "scratch";
+			};
+
+			/*
+			 * nvram_pad: 0xff5000 - 0xff8000 (12 KiB).
+			 * Tre settori erased subito prima della NVRAM
+			 * Broadcom. Probabilmente padding lasciato dal
+			 * tool di flash factory per allineare la NVRAM
+			 * a un confine di blocco. Read-only per
+			 * conservativismo: non sappiamo se l'OEM lo
+			 * usi per scratch interno tra reboot.
+			 */
+			partition@ff5000 {
+				reg = <0xff5000 0x003000>;
+				label = "nvram_pad";
+				read-only;
+			};
+
+			/*
+			 * nvram: 0xff8000 - 0x1000000 (32 KiB).
+			 * NVRAM Broadcom PSI (Persistent Storage Image),
+			 * magic "gOGoBrCm" + "BLP0" header. Contiene la
+			 * configurazione utente OEM compressa LZW
+			 * (snmp_state, tr69c_acsState, ecc.) con CRC32.
+			 * Indipendente dalla struct NVRAM_DATA embedded
+			 * in CFE a offset 0x580 (da cui prendiamo il MAC):
+			 * questa qui e' configurazione runtime utente,
+			 * quella in CFE e' factory-set.
+			 *
+			 * Read-only: alterarla non brick-a il device ma
+			 * confonde lo stock se mai si vuole tornare al
+			 * firmware originale.
+			 */
+			partition@ff8000 {
+				reg = <0xff8000 0x008000>;
+				label = "nvram";
+				read-only;
+			};
+		};
+	};
+};
+
+/*
+ * Cascading DSA. Sul BCM6362 il path RGMII out passa attraverso
+ * port@4 dello switch interno (RoboSwitch su 0x10e00000), come
+ * confermato dal boardparms OEM Broadcom per "DSL-3580":
+ *
+ *     {bp_ulPortMap,  .u.ul = 0x10},                   // solo port@4
+ *     {bp_ulPhyId4,   .u.ul = RGMII_DIRECT|EXTSW_CONNECTED},
+ *
+ * Schema:
+ *   PC -- LAN N -- [BCM53125 esterno] -- port@8 RGMII --
+ *   port@4 RGMII -- [&switch0 interno] -- port@8 internal --
+ *   [&ethernet GMAC] -- eth0
+ *
+ * Due DSA tree con un solo conduit (eth0): tree 0 = switch interno,
+ * tree 1 = 53125 esterno ancorato a &switch0port4. Stesso schema
+ * dell'HG253S-V2 in mainline OpenWrt che condivide il SoC.
+ *
+ * Storia dei tentativi precedenti su questo blocco:
+ *
+ * 1) &switch0 attivo + 53125 ancorato a &ethernet:
+ *    sysfs: cannot create duplicate filename '.../eth0/dsa'
+ *    b53-switch 10e00000.switch: probe ... failed with error -17
+ *    Notifier penzolanti dopo il rollback fallito di
+ *    dsa_register_switch -> kernel panic ("Reserved instruction",
+ *    PC nello heap) al primo netdev event.
+ *
+ * 2) &switch0 status="disabled":
+ *    Niente panic, ma rx_packets di eth0 fermo a 0 anche con PHY
+ *    in link sulle porte LAN: il path RGMII passa da uno switch
+ *    spento, i frame non raggiungono mai il GMAC.
+ */
+&switch0 {
+	dsa,member = <0 0>;
+
+	ports {
+		switch0port4: port@4 {
+			reg = <4>;
+			label = "extsw";
+
+			phy-mode = "rgmii-id";
+
+			fixed-link {
+				speed = <1000>;
+				full-duplex;
+			};
+		};
+	};
+};
+
+&ohci {
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ohci_port1: port@1 {
+		reg = <1>;
+		#trigger-source-cells = <0>;
+	};
+};
+
+/*
+ * PCIe interno abilitato. Sulla DSL-3580L vivono due device:
+ *   - radio 2.4 GHz integrato del BCM6362 (chip 14e4:435f) sul
+ *     primo bus dietro il bridge interno
+ *   - radio 5 GHz BCM4352 (chip 14e4:43b3) su un secondo bus
+ *     dietro lo stesso bridge
+ * Vedi i due nodi `bcm{6362,4352}-sprom` sopra.
+ *
+ * La finestra PCIe nel bcm6362.dtsi default e' 1 MB
+ * (0x10f00000-0x10ffffff), sufficiente per i radio b43 vecchi
+ * tipici delle altre board bmips. Il BCM4352 ha BAR2 da 2 MB
+ * (memoria condivisa AC-PHY) che non c'entra in 1 MB:
+ *
+ *   pci 0000:01:00.0: BAR 2 [mem size 0x00200000 64bit]:
+ *     can't assign; no space
+ *
+ * Il driver bcm6328-pcie programma BAR0_BASEMASK e
+ * BAR0_REBASE_ADDR partendo da `ranges` con granularita' 1 MB
+ * (vedi pcie-bcm6328.c, righe ~278-287), quindi qualunque
+ * dimensione che mettiamo qui viene programmata in HW. La
+ * mappa SoC del BCM6362 non ha periferiche oltre 0x10e50000,
+ * quindi possiamo allargare a 4 MB (0x10f00000-0x112fffff)
+ * senza conflitti.
+ *
+ * 4 MB > 2 MB BAR2 + bridge overhead, con margine se in futuro
+ * subentrano altri device PCIe.
+ */
+&pcie {
+	status = "okay";
+
+	ranges = <0x02000000 0 0x10f00000  0x10f00000  0 0x00400000>;
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&usbh {
+	status = "okay";
+};
+
+/*
+ * Radio 2.4 GHz integrato del BCM6362 (14e4:435f).
+ *
+ * Esposto via bcm6362-wlan-shim sul SoC backplane bcma, NON via
+ * PCI. La SPROM viene servita da bcm6362-sprom sopra, matchato
+ * per phandle (bcma-bus = <&wlan>). Vedi commenti dettagliati
+ * sulla bring-up sequence e topologia in bcm6362.dtsi.
+ */
+&wlan {
+	status = "okay";
+};

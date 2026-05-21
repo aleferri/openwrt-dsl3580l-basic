@@ -44,6 +44,7 @@ infrastructure to host_soc for this class of SoC:
 scan.c's bcma_scan_read32 and bcma_erom_get_ent now branch on
 bus->big_endian.
 
+Assisted-by: Claude:claude-4.7-opus
 Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
 ---
  drivers/bcma/host_soc.c   | 244 +++++++++++++++++++++++++++++++++++++-

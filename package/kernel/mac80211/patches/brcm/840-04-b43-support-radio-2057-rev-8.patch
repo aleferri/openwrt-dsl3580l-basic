@@ -1,6 +1,57 @@
+From: Alessio Ferri <alessio.ferri@mythread.it>
+Date: Thu, 21 May 2026 02:46:46 +0200
+Subject: [PATCH v2 4/7] b43: support radio 2057 rev 8
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Message-Id: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-4-46ea1c209a30@gmail.com>
+References: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-0-46ea1c209a30@gmail.com>
+In-Reply-To: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-0-46ea1c209a30@gmail.com>
+To: linux-wireless@vger.kernel.org, b43-dev@lists.infradead.org, 
+ linux-kernel@vger.kernel.org, Alessio <alessio.ferri.3012@gmail.com>
+Cc: Alessio Ferri <alessio.ferri@mythread.it>
+X-Mailer: b4 0.14.3
+
+Add support for radio 2057 revision 8, paired with N-PHY rev 8 on
+the Broadcom BCM6362 single-die integrated 2.4 GHz wireless block.
+
+Three correlated changes are needed for the same chip:
+
+  - main.c: the radio_rev allow-list under B43_PHYTYPE_N currently
+    accepts radio 2057 revisions 9 and 14 only; extend to include
+    rev 8.
+
+  - radio_2057.c: the existing r2057_rev8_init[] is a 54-entry stub
+    declared inside a TODO comment block and never referenced
+    from r2057_upload_inittabs().
+    Replace it with the full 412-entry register set actually
+    programmed by the proprietary Broadcom wl driver on this radio.
+    I couldn't find the origin of the original 54-entry stub - 8
+    of its entries do not appear at all in the rev 8 register set
+    and 7 more carry different values.
+    Loading it instead of using the real table leaves the radio
+    hanging producing a "Microcode not responding" timeout.
+
+  - radio_2057.c: r2057_upload_inittabs() case 8 handles radio_rev
+    5 and 7 only; add the radio_rev == 8 branch pointing at the
+    new table.
+
+The init table is extracted from an MMIO dump of the radio
+register set programmed during proprietary driver initialisation
+on BCM6362 silicon (Broadcom wl driver 6.30.102.7).
+
+Assisted-by: Claude:claude-4.7-opus
+Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
+---
+ drivers/net/wireless/broadcom/b43/main.c       |   3 +-
+ drivers/net/wireless/broadcom/b43/radio_2057.c | 124 +++++++++++++++++++++----
+ 2 files changed, 110 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/b43/main.c b/drivers/net/wireless/broadcom/b43/main.c
+index 783af26cb..817448e58 100644
 --- a/drivers/net/wireless/broadcom/b43/main.c
 +++ b/drivers/net/wireless/broadcom/b43/main.c
-@@ -4609,7 +4609,8 @@ static int b43_phy_versioning(struct b43_wldev *dev)
+@@ -4617,7 +4617,8 @@ static int b43_phy_versioning(struct b43_wldev *dev)
  		    radio_id != 0x2057)
  			unsupported = 1;
  		if (radio_id == 0x2057 &&
@@ -10,6 +61,8 @@
  			unsupported = 1;
  		break;
  	case B43_PHYTYPE_LP:
+diff --git a/drivers/net/wireless/broadcom/b43/radio_2057.c b/drivers/net/wireless/broadcom/b43/radio_2057.c
+index bd7dafb56..9f693d92b 100644
 --- a/drivers/net/wireless/broadcom/b43/radio_2057.c
 +++ b/drivers/net/wireless/broadcom/b43/radio_2057.c
 @@ -73,24 +73,112 @@ static u16 r2057_rev7_init[][2] = {
@@ -152,3 +205,7 @@
  		}
  		break;
  	case 9:
+
+-- 
+2.54.0
+

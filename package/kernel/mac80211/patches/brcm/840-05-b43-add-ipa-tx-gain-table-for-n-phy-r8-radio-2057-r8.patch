@@ -1,3 +1,48 @@
+From: Alessio Ferri <alessio.ferri@mythread.it>
+Date: Thu, 21 May 2026 02:46:47 +0200
+Subject: [PATCH v2 5/7] b43: add IPA TX gain table for N-PHY r8 + radio
+ 2057 r8
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Message-Id: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-5-46ea1c209a30@gmail.com>
+References: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-0-46ea1c209a30@gmail.com>
+In-Reply-To: <20260521-b43_complete_n_phy_rev_8_radio_2057_rev_8_support-v1-0-46ea1c209a30@gmail.com>
+To: linux-wireless@vger.kernel.org, b43-dev@lists.infradead.org, 
+ linux-kernel@vger.kernel.org, Alessio <alessio.ferri.3012@gmail.com>
+Cc: Alessio Ferri <alessio.ferri@mythread.it>
+X-Mailer: b4 0.14.3
+
+Add the 2.4 GHz IPA TX gain table for N-PHY rev 8 paired with radio
+2057 rev 8 and wire it to the existing dispatcher.
+
+b43_nphy_get_ipa_gain_table() in tables_nphy.c currently handles
+case 8 only for radio_rev == 5; radio_rev == 8 falls through and
+the function logs:
+
+    b43-phyX ERROR: No 2GHz IPA gain table available for this device
+    b43-phyX ERROR: PHY init: Channel switch to default failed
+
+leaving b43_phy_init() to return an error and core_init to abort
+before the MAC is enabled.
+
+The high byte of every entry differs from the rev 5 sibling (0x40
+vs 0x30): different PAD-gain code prefix for the rev 8 front-end.
+The low 24 bits coincide with rev 5 across the whole table - the
+gain step amplitudes are the same, only the PAD-gain selector
+prefix changes.
+
+Values extracted from an MMIO dump of the proprietary Broadcom wl
+driver running on BCM6362 silicon (wl driver 6.30.102.7).
+
+Assisted-by: Claude:claude-4.7-opus
+Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
+---
+ drivers/net/wireless/broadcom/b43/tables_nphy.c | 39 +++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/b43/tables_nphy.c b/drivers/net/wireless/broadcom/b43/tables_nphy.c
+index 41a25d909..84e8d718d 100644
 --- a/drivers/net/wireless/broadcom/b43/tables_nphy.c
 +++ b/drivers/net/wireless/broadcom/b43/tables_nphy.c
 @@ -2715,6 +2715,43 @@ static const u32 b43_ntab_tx_gain_ipa_2057_rev5_2g[] = {
@@ -53,3 +98,7 @@
  			break;
  		case 6:
  			if (dev->dev->chip_id == BCMA_CHIP_ID_BCM47162)
+
+-- 
+2.54.0
+

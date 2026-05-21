@@ -21,6 +21,7 @@ include/linux/bcma/bcma.h with the in-tree comment "SHIM
 component in ubus/6362"; this patch is what makes the SHIM core
 actually probe and bind.
 
+Assisted-by: Claude:claude-4.7-opus
 Signed-off-by: Alessio Ferri <alessio.ferri@mythread.it>
 ---
  drivers/bcma/scan.c | 15 +++++++++++++++

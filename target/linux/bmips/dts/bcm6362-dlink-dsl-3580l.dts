@@ -30,29 +30,7 @@
 		 * The four front-panel buttons of the DSL-3580L are wired to
 		 * the four GPIO pads that the SoC also exposes as the
 		 * ext_irq0..3 alternate function inputs of the external
-		 * interrupt controller (brcm,bcm6345-ext-intc). That gives
-		 * us IRQ-driven keys instead of the 100ms polling we used
-		 * before.
-		 *
-		 * No pinctrl-0 = <&pinctrl_ext_irqN> here on purpose: on
-		 * BCM63xx the pad input buffer feeds both the GPIO data
-		 * register and the ExtINT input lines in parallel, so the
-		 * pad stays readable via gpiod_get_value() (which
-		 * gpio-keys.c uses to fill the press/release state) AND
-		 * the ExtINT controller sees transitions without the pin
-		 * being switched out of GPIO mode. If this assumption ever
-		 * turns out wrong on a specific silicon revision and IRQs
-		 * never fire, add the pinctrl groups to the corresponding
-		 * key node and switch its interrupts to
-		 * IRQ_TYPE_EDGE_FALLING (gpiod_get_value() would then
-		 * return 0 in alt-mux mode, so EDGE_BOTH would mis-report
-		 * release events).
-		 *
-		 * debounce-interval is kept at 60ms for documentation:
-		 * gpio-keys passes it to gpiod_set_debounce() which is a
-		 * no-op on BCM63xx (no hardware debounce). If the buttons
-		 * bounce, software debounce can be added userspace-side or
-		 * by switching to the gpio-keys built-in hrtimer path.
+		 * interrupt controller (brcm,bcm6345-ext-intc).
 		 */
 
 		reset {
@@ -253,17 +231,9 @@
 };
 
 /*
- * Switch esterno BCM53125. Il Makefile GPL riportava
- *   BRCM_EXT_SWITCH_TYPE=53115, BRCM_EXT_SWITCH_REV="a0"
- * ma quello e' il nome del driver MDK Broadcom riusato, non
- * il chip ID. Il dump CFE/kernel stock dice esplicitamente:
- *   External switch id = 53125
- *   Note: Forcing 53115 driver for 53125
- * In b53 mainline 53115 e 53125 sono compatible distinti.
- * Attaccato a lsspi CS=2 (boardparms:
- *   BP_OVERLAY_SPI_SSB2_EXT_CS + BP_ENET_CONFIG_SPI_SSB_2).
+ * lsspi CS=2 (boardparms: BP_OVERLAY_SPI_SSB2_EXT_CS + BP_ENET_CONFIG_SPI_SSB_2).
  *
- * Mapping etichette dal boardparms:
+ * labels for boardparms:
  *   port 0  -> eth0  -> WAN
  *   port 1  -> eth4  -> LAN4
  *   port 2  -> eth3  -> LAN3
@@ -328,18 +298,7 @@
 };
 
 /*
- * Flash SPI-NOR MX25L128 da 16 MB single-bank (confermato dal
- * dump dei log stock: "HS Serial flash device: name MX25L128,
- * id 0xc218 size 16384KB"). Niente dual-bank / niente fallback
- * automatico in caso di flash interrotta — il recovery va fatto
- * via TFTP da CFE seriale.
- *
- * Layout SPI (frequency, bus-width) copiato dal Comtrend
- * AR-5381u / Innacomm W3400v6 (stesso target bmips, stesso uso
- * di brcm,bcm963xx-imagetag). Da abbassare se la flash della
- * board specifica non li tollera (sintomi: corruption / hang
- * in lettura): togliere le due righe spi-*-bus-width e portare
- * spi-max-frequency a 10000000 o 8000000.
+ * Flash SPI-NOR MX25L128 16 MB single-bank. No dual boot
  */
 &hsspi {
 	status = "okay";
@@ -367,17 +326,8 @@
 					#size-cells = <1>;
 
 					/*
-					 * Offset MAC base 0x6a0 e' il default
-					 * Broadcom CFE (= NVRAM_DATA_OFFSET
-					 * 0x580 + offset di ucaBaseMacAddr
-					 * dentro la struct nvram, 0x120).
-					 *
-					 * Convenzione MAC indice -> interfaccia
-					 * sullo stock D-Link DSL-3580L (verificata
-					 * dal `ifconfig -a` del firmware OEM
-					 * 6.30.102.7, salvato in
-					 * router-data/dsl3580l/router_info.txt
-					 * del repo b43-add-bcm43xx-ac):
+					 * Offset MAC base 0x6a0 is default
+					 * in Broadcom CFE
 					 *
 					 *   base + 0  ->  D8:FE:E3:E2:A1:3C
 					 *                 LAN/bridge (bcmsw, br0,
@@ -408,39 +358,28 @@
 			};
 
 			/*
-			 * psi_marker: 0x8c5000 - 0x8d5000 (64 KiB).
-			 * Settore con 13 byte di sentinella all'inizio
-			 * (35 ea 91 b4 92 23 be 73 98 e4 bd 5a 9a) seguiti
-			 * da FF. Probabilmente un boundary marker letto
-			 * dal CFE per validare l'integrita' della factory
-			 * image o per delimitare l'area scratch sottostante.
-			 * Read-only per non rischiare di alterarlo.
+			 * psi_marker: 0x8c0000 - 0x8d0000 (64 KiB).
+			 * 13 byte filled near the start
+			 * (35 ea 91 b4 92 23 be 73 98 e4 bd 5a 9a),
+			 * followed by erased blocks
+			 * Read-only just because.
 			 */
-			partition@8c5000 {
+			partition@8c0000 {
 				reg = <0x8c0000 0x010000>;
 				label = "psi_marker";
 				read-only;
 			};
 
 			/*
-			 * scratch: 0x8d5000 - 0xff5000 (7296 KiB).
-			 * Settori erased (0xff) nella flash stock, mai
-			 * scritti dall'OEM. Esposti scrivibili: utili come
-			 * area utente per dump, log persistenti, secondo
-			 * overlay, o estensione futura di firmware/rootfs.
-			 */
-			/* Start bumped from 0x8d5000 to 0x8e0000 (next erase-block
-			 * boundary, 64 KiB) so mtd doesn't force read-only on a
-			 * misaligned offset. Loses 44 KiB of scratch space at the
-			 * front; remaining 7.2 MiB is plenty for the intended use
-			 * (dumps, persistent logs, secondary overlay). */
+			 * scratch: 0x8e0000 - 0xff0000.
+			 * Erased blocks (0xff) in stock flash
 			partition@8e0000 {
-				reg = <0x8e0000 0x715000>;
+				reg = <0x8e0000 0x710000>;
 				label = "scratch";
 			};
 
 			/*
-			 * nvram_pad: 0xff5000 - 0xff8000 (12 KiB).
+			 * nvram_pad: 0xff0000 - 0xff8000 (12 KiB).
 			 * Tre settori erased subito prima della NVRAM
 			 * Broadcom. Probabilmente padding lasciato dal
 			 * tool di flash factory per allineare la NVRAM
@@ -448,8 +387,8 @@
 			 * conservativismo: non sappiamo se l'OEM lo
 			 * usi per scratch interno tra reboot.
 			 */
-			partition@ff5000 {
-				reg = <0xff5000 0x003000>;
+			partition@ff0000 {
+				reg = <0xff0000 0x008000>;
 				label = "nvram_pad";
 				read-only;
 			};

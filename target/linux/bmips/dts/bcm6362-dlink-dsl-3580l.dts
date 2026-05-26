@@ -429,14 +429,14 @@
 			};
 
 			/*
+			/*
 			 * scratch: 0x8e0000 - 0xff0000.
-			 * Erased blocks (0xff) in stock flash
-             */
+			 * Erased blocks (0xff) in stock flash.
+			 */
 			partition@8e0000 {
 				reg = <0x8e0000 0x710000>;
 				label = "scratch";
 			};
-
 			/*
 			 * nvram_pad: 0xff0000 - 0xff8000 (32 KiB).
 			 * Tre settori erased subito prima della NVRAM

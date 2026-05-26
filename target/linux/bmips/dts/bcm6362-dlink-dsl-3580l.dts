@@ -431,6 +431,7 @@
 			/*
 			 * scratch: 0x8e0000 - 0xff0000.
 			 * Erased blocks (0xff) in stock flash
+             */
 			partition@8e0000 {
 				reg = <0x8e0000 0x710000>;
 				label = "scratch";

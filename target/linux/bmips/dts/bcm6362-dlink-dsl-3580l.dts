@@ -438,7 +438,7 @@
 			};
 
 			/*
-			 * nvram_pad: 0xff0000 - 0xff8000 (12 KiB).
+			 * nvram_pad: 0xff0000 - 0xff8000 (32 KiB).
 			 * Tre settori erased subito prima della NVRAM
 			 * Broadcom. Probabilmente padding lasciato dal
 			 * tool di flash factory per allineare la NVRAM

@@ -429,7 +429,6 @@
 			};
 
 			/*
-			/*
 			 * scratch: 0x8e0000 - 0xff0000.
 			 * Erased blocks (0xff) in stock flash.
 			 */

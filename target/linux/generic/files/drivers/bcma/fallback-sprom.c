@@ -57,7 +57,8 @@ struct bcma_fbs {
 	/* Match by DT phandle (host_soc buses, e.g. the integrated
 	 * BCM6362 WLAN behind bcm6362-wlan-shim) — set when DT
 	 * provides "bcma-bus = <&phandle>". The phandle target is
-	 * the parent of the brcm,bus-axi node bcma is probed on. */
+	 * the parent device that instantiated the bcma child (in
+	 * the SHIM-attached path, the SHIM bridge node itself). */
 	struct device_node *bcma_bus_np;
 
 	bool devid_override;
@@ -69,26 +70,31 @@ static struct list_head bcma_fbs_list = LIST_HEAD_INIT(bcma_fbs_list);
 int bcma_get_fallback_sprom(struct bcma_bus *bus, struct ssb_sprom *out)
 {
 	struct bcma_fbs *pos;
-	struct device_node *axi_np, *parent_np;
+	struct device_node *parent_np = NULL;
 	u32 pci_bus = 0, pci_dev = 0;
 	bool soc;
 
 	switch (bus->hosttype) {
 	case BCMA_HOSTTYPE_PCI:
+		if (!bus->host_pci || !bus->host_pci->bus)
+			return -ENOENT;
 		pci_bus = bus->host_pci->bus->number;
 		pci_dev = PCI_SLOT(bus->host_pci->devfn);
 		soc = false;
 		break;
 	case BCMA_HOSTTYPE_SOC:
-		/* bcma_host_soc.c sets bus->dev to the platform device
-		 * of the brcm,bus-axi node; its DT parent is what the
-		 * sprom node points to via phandle. */
-		if (!bus->dev || !bus->dev->of_node)
+		/* The phandle target is the parent device that instantiated
+		 * the bcma child. For the SHIM-attached path the bcma
+		 * platform_device is built programmatically by the parent
+		 * bridge driver and has no of_node of its own; its struct
+		 * device parent is the bridge driver's pdev, which carries
+		 * the bridge of_node. Use the device hierarchy rather than
+		 * DT navigation so both creation paths work.
+		 */
+		if (!bus->dev || !bus->dev->parent ||
+		    !bus->dev->parent->of_node)
 			return -ENOENT;
-		axi_np = bus->dev->of_node;
-		parent_np = of_get_parent(axi_np);
-		if (!parent_np)
-			return -ENOENT;
+		parent_np = bus->dev->parent->of_node;
 		soc = true;
 		break;
 	default:
@@ -102,7 +108,6 @@ int bcma_get_fallback_sprom(struct bcma_bus *bus, struct ssb_sprom *out)
 			memcpy(out, &pos->sprom, sizeof(struct ssb_sprom));
 			dev_info(pos->dev, "requested by SoC bcma [%pOFn]\n",
 				 parent_np);
-			of_node_put(parent_np);
 			return 0;
 		}
 
@@ -121,13 +126,11 @@ int bcma_get_fallback_sprom(struct bcma_bus *bus, struct ssb_sprom *out)
 		return 0;
 	}
 
-	if (soc) {
-		of_node_put(parent_np);
+	if (soc)
 		pr_err("unable to fill SPROM for SoC bcma [%pOFn]\n",
-		       axi_np);
-	} else {
+		       parent_np);
+	else
 		pr_err("unable to fill SPROM for [%x:%x]\n", pci_bus, pci_dev);
-	}
 
 	return -EINVAL;
 }

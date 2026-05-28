@@ -501,8 +501,8 @@
 		 * Integrated 2.4 GHz WLAN.
 		 *
 		 * The radio sits on a Broadcom AMBA (AXI/OCP) backplane
-		 * — the same kind bcma calls "brcm,bus-axi" — gated by
-		 * a small SHIM bridge on the SoC ubus:
+		 * — what bcma calls "brcm,bus-axi" — gated by a small
+		 * SHIM bridge on the SoC ubus:
 		 *
 		 *   ubus  ─►  WLAN SHIM  ─►  AXI backplane  ┬─► ChipCommon @ 0x10004000
 		 *             @ 0x10007000                  └─► d11 MAC @ 0x10005000
@@ -511,16 +511,17 @@
 		 * driven by bcm6362-wlan-shim) — owns clock, resets,
 		 * power-domain, and the bring-up sequence CFE skips.
 		 *
-		 * Its child 'axi@10004000' is the bcma backplane —
-		 * standard "brcm,bus-axi" probed by drivers/bcma/
-		 * host_soc.c, which enumerates the 802.11 core and lets
-		 * b43 bind to it as a normal bcma device.
+		 * Its child 'axi@10004000' is the bcma backplane — a
+		 * generic "brcm,bus-axi" probed by drivers/bcma/host_soc.c.
+		 * The shim driver attaches struct bcma_host_soc_pdata
+		 * (big_endian + shim_attached + the SHIM iomem pointer)
+		 * to the child via of_dev_auxdata at populate time, so
+		 * the bcma node stays SoC-agnostic in DT: all the
+		 * 6362-specific knowledge lives in the shim driver.
 		 *
 		 * Expected Hardware identifiers:
 		 *   chipnum 0x6362, chiprev 0x1, corerev 0x16 (d11 rev 22),
 		 *   radio 2057 (N-PHY family 43226).
-		 *
-		 * Bring-up sequence: need quirk-enabled bcma.
 		 */
 		wlan: wlan@10007000 {
 			compatible = "brcm,bcm6362-wlan";
@@ -541,20 +542,13 @@
 
 			/* bcma backplane — probed by drivers/bcma/host_soc.c.
 			 * 'reg' points at ChipCommon; bcma scans the bus from
-			 * there and picks up the 802.11 core at +0x1000. */
+			 * there and picks up the 802.11 core at +0x1000. The
+			 * interrupt-map below routes the d11 core's IRQ to
+			 * periph_intc via the standard DT interrupt-map walk
+			 * (bcma_of_get_irq → of_irq_parse_raw).
+			 */
 			axi@10004000 {
-				/*
-				 * Specific compatible drives the host_soc
-				 * quirks lookup (BE accessors + SHIM-style
-				 * wrapper-less core allowlist); the generic
-				 * one is the fallback that mainline matches.
-				 *
-				 * The WLAN backplane need to be accessed as big-endian
-				 * peripheral. Un-quirked bcma byte-swap on
-				 * BE MIPS CPUs;
-				 */
-				compatible = "brcm,bcm6362-bus-axi",
-					     "brcm,bus-axi";
+				compatible = "brcm,bus-axi";
 				reg = <0x10004000 0x1000>;
 				ranges = <0x00000000 0x10004000 0x00002000>;
 
@@ -563,8 +557,10 @@
 				#interrupt-cells = <1>;
 
 				/* The 802.11 core sits at +0x1000 from the
-				 * ChipCommon base, i.e. 0x10005000. interrupt-
-				 * map is keyed on the low bits of it's absolute address. */
+				 * ChipCommon base, i.e. 0x10005000.
+				 * interrupt-map is keyed on the low bits
+				 * of its absolute address.
+				 */
 				interrupt-map-mask = <0x000fffff 0xffff>;
 				interrupt-map = <0x00005000 0
 						 &periph_intc 0 BCM6362_IRQ_WLAN>;

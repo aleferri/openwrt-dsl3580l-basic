@@ -51,6 +51,7 @@ define Device/dlink_dsl-3580l
   IMAGE/sysupgrade.bin := cfe-bin | append-metadata
   DEVICE_PACKAGES += $(USB2_PACKAGES) \
     $(B43_PACKAGES) \
+    kmod-bcm6362-wlan-shim \
     broadcom-6362-sprom broadcom-4360-sprom \
     kmod-leds-bcm6328 kmod-leds-gpio
 endef

@@ -445,7 +445,7 @@ define KernelPackage/bcma
 	CONFIG_BCMA_FALLBACK_SPROM=y \
 	CONFIG_BCMA_HOST_PCI_POSSIBLE=y \
 	CONFIG_BCMA_HOST_PCI=y \
-	CONFIG_BCMA_HOST_SOC=n \
+	CONFIG_BCMA_HOST_SOC=$(if $(CONFIG_PACKAGE_kmod-bcm6362-wlan-shim),y,n) \
 	CONFIG_BCMA_DRIVER_MIPS=n \
 	CONFIG_BCMA_DRIVER_PCI_HOSTMODE=n \
 	CONFIG_BCMA_DRIVER_GMAC_CMN=n \
@@ -459,6 +459,24 @@ define KernelPackage/bcma/description
 endef
 
 $(eval $(call KernelPackage,bcma))
+
+
+define KernelPackage/bcm6362-wlan-shim
+  SUBMENU:=$(OTHER_MENU)
+  TITLE:=BCM6362 on-chip WLAN SHIM bridge
+  DEPENDS:=@TARGET_bmips_bcm6362 +kmod-bcma
+  KCONFIG:=CONFIG_BCM6362_WLAN_SHIM
+  FILES:=$(LINUX_DIR)/drivers/bus/bcm6362-wlan-shim.ko
+  AUTOLOAD:=$(call AutoLoad,30,bcm6362-wlan-shim)
+endef
+
+define KernelPackage/bcm6362-wlan-shim/description
+ Bring-up driver for the SHIM bridge gating the integrated 2.4 GHz WLAN
+ block of the BCM6362 SoC. Loaded from rootfs as a module so bcma (and the
+ firmware-backed SPROM fallback) come up after the filesystem is mounted.
+endef
+
+$(eval $(call KernelPackage,bcm6362-wlan-shim))
 
 
 define KernelPackage/mfd

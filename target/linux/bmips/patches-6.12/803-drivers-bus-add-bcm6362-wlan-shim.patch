@@ -1,0 +1,39 @@
+Sent upstream https://lore.kernel.org/linux-devicetree/20260529-add-bcm6362-wlan-v1-0-722242777f58@gmail.com/T/
+unified with the driver code found in files/drivers/bus/bcm6362-wlan-shim.c
+---
+ drivers/bus/Kconfig  | 11 +++++++++++
+ drivers/bus/Makefile |  1 +
+ 2 files changed, 12 insertions(+)
+
+--- a/drivers/bus/Kconfig
++++ b/drivers/bus/Kconfig
+@@ -29,6 +29,19 @@
+ 	  Say y here to enable support for the ARM Logic Module bus
+ 	  found on the ARM Integrator AP (Application Platform)
+ 
++config BCM6362_WLAN_SHIM
++	tristate "BCM6362 on-chip WLAN SHIM bridge"
++	depends on BMIPS_GENERIC || COMPILE_TEST
++	depends on OF
++	select BCMA
++	select BCMA_HOST_SOC
++	help
++	  Bring-up driver for the SHIM bridge that gates the integrated
++	  2.4 GHz WLAN block of the BCM6362 SoC. The driver releases the
++	  SHIM from reset, configures clocks, and then instantiates a
++	  bcma-host-soc child platform device whose bcma backplane is
++	  enumerated by the bcma driver.
++
+ config BRCMSTB_GISB_ARB
+ 	tristate "Broadcom STB GISB bus arbiter"
+ 	depends on ARCH_BRCMSTB || BMIPS_GENERIC
+--- a/drivers/bus/Makefile
++++ b/drivers/bus/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_MOXTET)		+= moxtet.o
+ # DPAA2 fsl-mc bus
+ obj-$(CONFIG_FSL_MC_BUS)	+= fsl-mc/
+ 
++obj-$(CONFIG_BCM6362_WLAN_SHIM)	+= bcm6362-wlan-shim.o
+ obj-$(CONFIG_BT1_APB)		+= bt1-apb.o
+ obj-$(CONFIG_BT1_AXI)		+= bt1-axi.o
+ obj-$(CONFIG_IMX_WEIM)		+= imx-weim.o

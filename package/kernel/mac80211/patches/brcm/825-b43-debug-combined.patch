@@ -1,0 +1,116 @@
+From: DSL-3580L bring-up <bringup@example.invalid>
+Subject: [PATCH] b43: DEBUG instrumentation for DSL-3580L bring-up
+
+Debug-only. Drop before merge.
+
+Hunks:
+ 1. fatal-DMA branch: dump RX ring descriptors (slot 0 + last slot) and
+    the engine's current-descriptor pointer, to tell an I_DE (descriptor
+    protocol error) caused by a table/terminator/wrap problem apart from
+    one caused by a bad descriptor format.
+ 2. PSM start/poll/timeout state (wl0 microcode bring-up).
+ 3. b43_supported_bands: dev_id / phy type+rev / sprom ids.
+ 4. b43_setup_dmaring RX DMA64: what got written to RXRING*/RXCTL.
+---
+--- a/drivers/net/wireless/broadcom/b43/main.c
++++ b/drivers/net/wireless/broadcom/b43/main.c
+@@ -1996,6 +1996,31 @@
+ 			dma_reason[0], dma_reason[1],
+ 			dma_reason[2], dma_reason[3],
+ 			dma_reason[4], dma_reason[5]);
++		if (dev->dma.rx_ring &&
++		    dev->dma.rx_ring->type == B43_DMA_64BIT) {
++			struct b43_dmaring *r = dev->dma.rx_ring;
++			struct b43_dmadesc_generic *desc = r->descbase;
++			int last = r->nr_slots - 1;
++			u32 st = b43_read32(dev, r->mmio_base + B43_DMA64_RXSTATUS);
++
++			/* ctl0: b28 DTABLEEND, b30 FRAMEEND, b31 FRAMESTART */
++			b43err(dev->wl,
++				"DEBUG RX base=0x%08llx slots=%d curr=0x%x rxstat=0x%08x\n",
++				(unsigned long long)r->dmabase, r->nr_slots,
++				st & B43_DMA64_RXSTATDPTR, st);
++			b43err(dev->wl,
++				"DEBUG RXdesc[0]   c0=%08x c1=%08x alo=%08x ahi=%08x\n",
++				le32_to_cpu(desc[0].dma64.control0),
++				le32_to_cpu(desc[0].dma64.control1),
++				le32_to_cpu(desc[0].dma64.address_low),
++				le32_to_cpu(desc[0].dma64.address_high));
++			b43err(dev->wl,
++				"DEBUG RXdesc[%d] c0=%08x c1=%08x alo=%08x ahi=%08x\n", last,
++				le32_to_cpu(desc[last].dma64.control0),
++				le32_to_cpu(desc[last].dma64.control1),
++				le32_to_cpu(desc[last].dma64.address_low),
++				le32_to_cpu(desc[last].dma64.address_high));
++		}
+ #ifdef CPTCFG_B43_PIO
+ 		b43err(dev->wl, "This device does not support DMA "
+ 			       "on your system. It will now be switched to PIO.\n");
+@@ -2650,10 +2673,20 @@
+ 
+ 	b43_write32(dev, B43_MMIO_GEN_IRQ_REASON, B43_IRQ_ALL);
+ 
++	b43info(dev->wl,
++		"DEBUG pre-PSM_RUN: MACCTL=0x%08x IRQ_REASON=0x%08x SHM[UCODEREV]=0x%04x\n",
++		b43_read32(dev, B43_MMIO_MACCTL),
++		b43_read32(dev, B43_MMIO_GEN_IRQ_REASON),
++		b43_shm_read16(dev, B43_SHM_SHARED, B43_SHM_SH_UCODEREV));
++
+ 	/* Start the microcode PSM */
+ 	b43_maskset32(dev, B43_MMIO_MACCTL, ~B43_MACCTL_PSM_JMP0,
+ 		      B43_MACCTL_PSM_RUN);
+ 
++	b43info(dev->wl, "DEBUG post-PSM_RUN: MACCTL=0x%08x IRQ_REASON=0x%08x\n",
++		b43_read32(dev, B43_MMIO_MACCTL),
++		b43_read32(dev, B43_MMIO_GEN_IRQ_REASON));
++
+ 	/* Wait for the microcode to load and respond */
+ 	i = 0;
+ 	while (1) {
+@@ -2662,11 +2702,17 @@
+ 			break;
+ 		i++;
+ 		if (i >= 20) {
++			b43err(dev->wl,
++			       "DEBUG timeout: MACCTL=0x%08x IRQ_REASON=0x%08x SHM[UCREV]=0x%04x\n",
++			       b43_read32(dev, B43_MMIO_MACCTL), tmp,
++			       b43_shm_read16(dev, B43_SHM_SHARED, B43_SHM_SH_UCODEREV));
+ 			b43err(dev->wl, "Microcode not responding\n");
+ 			b43_print_fw_helptext(dev->wl, 1);
+ 			err = -ENODEV;
+ 			goto error;
+ 		}
++		if (i % 5 == 0)
++			b43info(dev->wl, "DEBUG poll i=%d IRQ_REASON=0x%08x\n", i, tmp);
+ 		msleep(50);
+ 	}
+ 	b43_read32(dev, B43_MMIO_GEN_IRQ_REASON);	/* dummy read */
+@@ -5315,6 +5365,12 @@
+ 	if (dev->dev->bus_sprom->dev_id)
+ 		dev_id = dev->dev->bus_sprom->dev_id;
+ 
++	b43info(dev->wl,
++		"DEBUG supported_bands: dev_id=0x%04x phy.type=%d phy.rev=%d board_type=0x%04x board_rev=0x%04x\n",
++		dev_id, dev->phy.type, dev->phy.rev,
++		dev->dev->bus_sprom->board_type,
++		dev->dev->bus_sprom->board_rev);
++
+ 	/* Note: below IDs can be "virtual" (not maching e.g. real PCI ID) */
+ 	switch (dev_id) {
+ 	case 0x4324: /* BCM4306 */
+--- a/drivers/net/wireless/broadcom/b43/dma.c
++++ b/drivers/net/wireless/broadcom/b43/dma.c
+@@ -727,8 +727,14 @@
+ 			b43_dma_write(ring, B43_DMA64_RXRINGHI, addrhi);
+ 			b43_dma_write(ring, B43_DMA64_RXINDEX, ring->nr_slots *
+ 				      sizeof(struct b43_dmadesc64));
++			b43info(ring->dev->wl,
++				"DEBUG dma_setup RX DMA64: base=0x%08llx alo=0x%08x ahi=0x%08x addrext=0x%x translation=0x%08x in_low=%d ctl=0x%08x\n",
++				(unsigned long long)ring->dmabase,
++				addrlo, addrhi, addrext,
++				ring->dev->dma.translation,
++				ring->dev->dma.translation_in_low, value);
+ 		} else {
+ 			u32 ringbase = (u32) (ring->dmabase);
+ 			addrext = b43_dma_address(&ring->dev->dma, ringbase, B43_DMA_ADDR_EXT);
+ 

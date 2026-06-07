@@ -1,0 +1,120 @@
+From: BCM6362 bringup <bringup@example.invalid>
+Subject: [PATCH] b43: preserve silicon-default Prefetch/BurstLen bits in DMA64
+ RXCTL programming
+
+b43's dmacontroller_setup() builds the DMA64 RXCTL value from zero
+and writes it fresh:
+
+	value = (ring->frameoffset << B43_DMA64_RXFROFF_SHIFT);
+	value |= B43_DMA64_RXENABLE;
+	value |= (addrext << B43_DMA64_RXADDREXT_SHIFT)
+	    & B43_DMA64_RXADDREXT_MASK;
+	if (!parity)
+		value |= B43_DMA64_RXPARITYDISABLE;
+	b43_dma_write(ring, B43_DMA64_RXCTL, value);
+
+That clobbers three register fields that the proprietary wl driver
+treats as silicon configuration values:
+
+  bits 18..20  PrefetchThreshold
+  bits 21..23  PrefetchControl
+  bits 24..25  BurstLen
+
+Static audit of the proprietary wl blob's RX engine programming
+(wlDSL-3580_EU.o_save, SHA-256
+a68a032673840c17a5981b0d00f16920ce992bca35ecdfba407bd6d488f28221)
+shows it does NOT write RXCTL from zero. Instead, in dma_attach
+@0x13e3c..0x13ea8 it samples RXCTL once at attach time (while the
+register is at the silicon reset value) and caches the three byte
+fields in the dma_info struct:
+
+  pi->181 = (RXCTL >> 18) & 0x7   /* PrefetchThreshold */
+  pi->186 = (RXCTL >> 21) & 0x7   /* PrefetchControl   */
+  pi->187 = (RXCTL >> 24) & 0x3   /* BurstLen          */
+
+Then _dma_rxenable @0x10964 re-injects them on every RXCTL
+programming alongside the new RxEnable / RxOffset / AddrExt bits.
+
+These values are not constants - they are silicon reset defaults
+that vary by chip and core revision. For the BCM6362 SoC the
+defaults happen to be benign on the integrated 802.11 die. For
+BCM4352 sitting on the BCM6362 PCIe RC the defaults select a
+prefetch/burst combination that the BCM4352 silicon is designed for
+when talking to a host RC; clobbering them to zero leaves the chip
+emitting inbound descriptor fetches with no prefetch and minimum
+burst, which on this RC pairing contributes to the descriptor-fetch
+I_PC master-abort fault observed in dmesg.
+
+This patch:
+  1. Adds three register-field defines in dma.h
+     (B43_DMA64_RXPREFTHRESH_*, B43_DMA64_RXPREFCTL_*,
+     B43_DMA64_RXBURSTLEN_*) for the bit ranges above.
+  2. In dmacontroller_setup()'s DMA64 RX path, reads RXCTL first
+     and ORs the three preserved fields into the new value, mirror-
+     ing _dma_rxenable. Reading once at setup is equivalent to the
+     OEM's attach-time cache: dmacontroller_setup always runs after
+     a fresh bcma core reset (probe path or controller_restart),
+     so RXCTL still contains the silicon defaults at this point.
+
+A symmetric audit and patch for DMA64 TXCTL (the OEM equivalent
+lives in dma64_txinit @0x134b8) is a separate change once the TX
+bit layout is confirmed from the disassembly - the TX register
+may have these fields at the same shifts or at different ones.
+
+Other RXCTL features the OEM handles conditionally that b43
+currently does not - notably OverflowContinue (bit 10, gated by
+pi->fifoenable & 0x2) - are out of scope here: they need the
+fifoenable provenance traced first.
+
+Tested on: D-Link DSL-3580L (BCM6362 SoC via bcma-host-soc, b43
+phy0 and BCM4352 via BCM6362 PCIe RC, b43 phy1).
+
+Signed-off-by: BCM6362 bringup <bringup@example.invalid>
+---
+--- a/drivers/net/wireless/broadcom/b43/dma.h
++++ b/drivers/net/wireless/broadcom/b43/dma.h
+@@ -118,6 +118,12 @@
+ #define		B43_DMA64_RXPARITYDISABLE		0x00000800
+ #define		B43_DMA64_RXADDREXT_MASK		0x00030000
+ #define		B43_DMA64_RXADDREXT_SHIFT		16
++#define		B43_DMA64_RXPREFTHRESH_MASK	0x001C0000
++#define		B43_DMA64_RXPREFTHRESH_SHIFT	18
++#define		B43_DMA64_RXPREFCTL_MASK		0x00E00000
++#define		B43_DMA64_RXPREFCTL_SHIFT	21
++#define		B43_DMA64_RXBURSTLEN_MASK	0x03000000
++#define		B43_DMA64_RXBURSTLEN_SHIFT	24
+ #define B43_DMA64_RXINDEX				0x24
+ #define B43_DMA64_RXRINGLO				0x28
+ #define B43_DMA64_RXRINGHI				0x2C
+--- a/drivers/net/wireless/broadcom/b43/dma.c
++++ b/drivers/net/wireless/broadcom/b43/dma.c
+@@ -716,7 +716,28 @@
+ 			addrlo = b43_dma_address(&ring->dev->dma, ringbase, B43_DMA_ADDR_LOW);
+ 			addrhi = b43_dma_address(&ring->dev->dma, ringbase, B43_DMA_ADDR_HIGH);
+ 
+-			value = (ring->frameoffset << B43_DMA64_RXFROFF_SHIFT);
++			/* Preserve PrefetchThreshold (bits 18..20),
++			 * PrefetchControl (bits 21..23) and BurstLen
++			 * (bits 24..25) silicon reset defaults. The
++			 * proprietary wl driver caches these in dma_attach
++			 * @0x13e3c..0x13ea8 of the DSL-3580L OEM blob
++			 * (SHA-256 a68a0326...) and re-injects them on
++			 * every RXCTL programming in _dma_rxenable
++			 * @0x10964. b43 used to clobber them to zero, so
++			 * the DMA engine ended up doing descriptor fetches
++			 * with no prefetch and minimum burst - on BCM4352
++			 * over the BCM6362 PCIe RC that interacts badly
++			 * with the inbound TLP sizing and contributes to
++			 * the descriptor-fetch I_PC fault. Reading once
++			 * here is equivalent to the OEM's attach-time
++			 * cache because dmacontroller_setup runs while the
++			 * register is still at reset defaults (the bcma
++			 * core has just been reset). */
++			value = b43_dma_read(ring, B43_DMA64_RXCTL) &
++				(B43_DMA64_RXPREFTHRESH_MASK |
++				 B43_DMA64_RXPREFCTL_MASK |
++				 B43_DMA64_RXBURSTLEN_MASK);
++			value |= (ring->frameoffset << B43_DMA64_RXFROFF_SHIFT);
+ 			value |= B43_DMA64_RXENABLE;
+ 			value |= (addrext << B43_DMA64_RXADDREXT_SHIFT)
+ 			    & B43_DMA64_RXADDREXT_MASK;

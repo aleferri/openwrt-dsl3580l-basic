@@ -1,0 +1,29 @@
+From: DSL-3580L bring-up <bringup@example.com>
+Date: Mon, 11 May 2026 08:45:00 +0000
+Subject: [PATCH] bcma: host_pci: claim BCM4352-family device id 0x43b3
+
+The DSL-3580L (and the family of BCM4352-derivative AC-PHY boards
+covered by the b43-add-bcm43xx-ac porting effort) exposes PCI device id
+0x14e4:0x43b3 to the host PCIe controller. That id is absent from
+bcma_pci_bridge_tbl[] in mainline, so bcma-pci-bridge does not bind to
+it out of the box and the backplane never gets enumerated.
+
+The chip identifies internally as BCM4352 (chip id 0x4352, chip rev 3,
+package 1; PHY type AC, rev 1; radio 2069), so b43 with the AC-PHY
+porting handles it once bcma reaches the D11 core. Add the id to the
+table so the driver claims it without an out-of-band new_id write.
+
+---
+ drivers/bcma/host_pci.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/drivers/bcma/host_pci.c
++++ b/drivers/bcma/host_pci.c
+@@ -305,6 +305,7 @@ static const struct pci_device_id bcma_p
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, 0x43a9) },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, 0x43aa) },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, 0x43b1) },
++	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, 0x43b3) },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, 0x4727) },
+ 	{ 0, },
+ };

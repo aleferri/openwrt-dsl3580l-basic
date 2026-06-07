@@ -1,0 +1,52 @@
+--- a/drivers/net/wireless/broadcom/b43/main.c
++++ b/drivers/net/wireless/broadcom/b43/main.c
+@@ -343,6 +343,22 @@ static struct ieee80211_supported_band b43_band_5GHz_aphy = {
+ 	.n_bitrates	= b43_a_ratetable_size,
+ };
+ 
++/*
++ * AC-PHY shares the A-PHY channel descriptors but cannot use channel 34
++ * (the Japan-only J52 leftover at the head of the table). The first
++ * universally-available 5 GHz channel for AC is 36, so we expose the
++ * A-PHY table offset by one entry. This keeps the channel list in a
++ * single place; if b43_5ghz_aphy_chantable[0] ever stops being channel
++ * 34, replace the offset with a dedicated table.
++ */
++static struct ieee80211_supported_band b43_band_5GHz_acphy = {
++	.band		= NL80211_BAND_5GHZ,
++	.channels	= b43_5ghz_aphy_chantable + 1,
++	.n_channels	= ARRAY_SIZE(b43_5ghz_aphy_chantable) - 1,
++	.bitrates	= b43_a_ratetable,
++	.n_bitrates	= b43_a_ratetable_size,
++};
++
+ static struct ieee80211_supported_band b43_band_2GHz = {
+ 	.band		= NL80211_BAND_2GHZ,
+ 	.channels	= b43_2ghz_chantable,
+@@ -5272,14 +5287,22 @@ static int b43_setup_bands(struct b43_wldev *dev,
+ 	if (have_2ghz_phy)
+ 		hw->wiphy->bands[NL80211_BAND_2GHZ] = limited_2g ?
+ 			&b43_band_2ghz_limited : &b43_band_2GHz;
+-	if (dev->phy.type == B43_PHYTYPE_N) {
+-		if (have_5ghz_phy)
++	if (have_5ghz_phy) {
++		switch (dev->phy.type) {
++		case B43_PHYTYPE_N:
+ 			hw->wiphy->bands[NL80211_BAND_5GHZ] = limited_5g ?
+ 				&b43_band_5GHz_nphy_limited :
+ 				&b43_band_5GHz_nphy;
+-	} else {
+-		if (have_5ghz_phy)
++			break;
++		case B43_PHYTYPE_AC:
++			/* Drops channel 34; first AC 5 GHz channel is 36. */
++			hw->wiphy->bands[NL80211_BAND_5GHZ] =
++				&b43_band_5GHz_acphy;
++			break;
++		default:
+ 			hw->wiphy->bands[NL80211_BAND_5GHZ] = &b43_band_5GHz_aphy;
++			break;
++		}
+ 	}
+ 
+ 	dev->phy.supports_2ghz = have_2ghz_phy;

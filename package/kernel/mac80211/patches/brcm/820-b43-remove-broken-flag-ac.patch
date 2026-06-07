@@ -1,0 +1,13 @@
+--- a/drivers/net/wireless/broadcom/b43/Kconfig
++++ b/drivers/net/wireless/broadcom/b43/Kconfig
+@@ -151,9 +151,9 @@
+ 
+ config B43_PHY_AC
+ 	bool "Support for AC-PHY (802.11ac) devices (BROKEN)"
+-	depends on B43 && B43_BCMA && BROKEN
++	depends on B43 && B43_BCMA
+ 	help
+ 	  This PHY type can be found in the following chipsets:
+ 	  PCI: BCM4352, BCM4360
+ 
+ 	  Say N, this is BROKEN and crashes driver.

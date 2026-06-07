@@ -1,0 +1,115 @@
+From: BCM6362 bringup <bringup@example.invalid>
+Subject: [PATCH] b43: preserve silicon-default MultipleRead/Prefetch/BurstLen
+ bits in DMA64 TXCTL programming
+
+Symmetric to the previous patch that preserved silicon reset
+defaults for the DMA64 RX engine. b43's dmacontroller_setup() TX
+path writes TXCTL fresh from B43_DMA64_TXENABLE plus AddrExt and
+ParityDisable, clobbering everything else.
+
+Static audit of the proprietary wl blob (wlDSL-3580_EU.o_save,
+SHA-256
+a68a032673840c17a5981b0d00f16920ce992bca35ecdfba407bd6d488f28221)
+shows dma_attach @0x13ed8..0x13f7c reads TXCTL four times at attach
+time (while the register is at silicon reset value) and caches four
+byte fields in the dma_info struct:
+
+  pi->182 = (TXCTL >> 18) & 0x7   /* PrefetchThreshold */
+  pi->183 = (TXCTL >>  6) & 0x3   /* MultipleRead      */
+  pi->184 = (TXCTL >> 21) & 0x7   /* PrefetchControl   */
+  pi->185 = (TXCTL >> 24) & 0x3   /* BurstLen          */
+
+Then dma64_txinit @0x13434..0x13508 re-injects them on every TXCTL
+programming via a mask-then-or sequence on each of the four ranges:
+
+  v = (TXCTL & 0xffe3ffff) | (pi->182 << 18)   /* PT */
+  v = (v     & 0xffffff3f) | (pi->183 <<  6)   /* MR */
+  v = (v     & 0xff1fffff) | (pi->184 << 21)   /* PC */
+  v = (v     & 0xfcffffff) | (pi->185 << 24)   /* BL */
+  TXCTL = v
+
+The four fields are silicon reset defaults; values differ by chip
+and core revision. RX has three of them (no MultipleRead);
+this patch adds the fourth.
+
+For BCM4352 sitting on the BCM6362 PCIe RC, clobbering these to
+zero leaves the TX DMA engine emitting inbound completion TLPs
+with no prefetch, no multi-read on chained descriptors, and the
+minimum burst length, which on this RC pairing contributes to
+the same descriptor-fetch master-abort fault category as the RX
+side (separately addressed by the previous patch).
+
+This patch:
+  1. Adds four register-field defines in dma.h
+     (B43_DMA64_TXMULTIREAD_*, B43_DMA64_TXPREFTHRESH_*,
+     B43_DMA64_TXPREFCTL_*, B43_DMA64_TXBURSTLEN_*).
+  2. In dmacontroller_setup()'s DMA64 TX path, reads TXCTL first
+     and ORs the four preserved fields into the new value,
+     mirroring the OEM dma64_txinit phase-1 RMW. Reading once at
+     setup is equivalent to the OEM's attach-time cache for the
+     same reason as the RX patch: dmacontroller_setup runs after
+     a fresh bcma core reset.
+
+The OEM's two-phase write (config phase setting MR/PT/PC/BL with
+XE still 0, then enable phase OR-ing in XE | maybe-PD) is collapsed
+into b43's single write here. The end state is the same for a
+clean post-reset engine; the silicon does not start fetching
+descriptors before the descriptor pointers are programmed (which
+happens after this write in dmacontroller_setup).
+
+Tested on: D-Link DSL-3580L (BCM6362 SoC via bcma-host-soc, b43
+phy0 and BCM4352 via BCM6362 PCIe RC, b43 phy1).
+
+Signed-off-by: BCM6362 bringup <bringup@example.invalid>
+---
+--- a/drivers/net/wireless/broadcom/b43/dma.h
++++ b/drivers/net/wireless/broadcom/b43/dma.h
+@@ -88,6 +88,14 @@
+ #define		B43_DMA64_TXLOOPBACK		0x00000004
+ #define		B43_DMA64_TXFLUSH			0x00000010
+ #define		B43_DMA64_TXPARITYDISABLE		0x00000800
++#define		B43_DMA64_TXMULTIREAD_MASK	0x000000C0
++#define		B43_DMA64_TXMULTIREAD_SHIFT	6
++#define		B43_DMA64_TXPREFTHRESH_MASK	0x001C0000
++#define		B43_DMA64_TXPREFTHRESH_SHIFT	18
++#define		B43_DMA64_TXPREFCTL_MASK		0x00E00000
++#define		B43_DMA64_TXPREFCTL_SHIFT	21
++#define		B43_DMA64_TXBURSTLEN_MASK	0x03000000
++#define		B43_DMA64_TXBURSTLEN_SHIFT	24
+ #define		B43_DMA64_TXADDREXT_MASK		0x00030000
+ #define		B43_DMA64_TXADDREXT_SHIFT		16
+ #define B43_DMA64_TXINDEX				0x04
+--- a/drivers/net/wireless/broadcom/b43/dma.c
++++ b/drivers/net/wireless/broadcom/b43/dma.c
+@@ -685,7 +685,30 @@
+ 			addrlo = b43_dma_address(&ring->dev->dma, ringbase, B43_DMA_ADDR_LOW);
+ 			addrhi = b43_dma_address(&ring->dev->dma, ringbase, B43_DMA_ADDR_HIGH);
+ 
+-			value = B43_DMA64_TXENABLE;
++			/* Preserve silicon reset defaults for MultipleRead
++			 * (bits 6..7), PrefetchThreshold (bits 18..20),
++			 * PrefetchControl (bits 21..23) and BurstLen
++			 * (bits 24..25). The DSL-3580L OEM blob caches all
++			 * four at attach time in dma_attach
++			 * @0x13ed8..0x13f7c (TX) - symmetric to the RX
++			 * three-field cache the previous patch handled -
++			 * and re-injects them on every TXCTL programming
++			 * in dma64_txinit @0x13434..0x13508 via a
++			 * mask-then-or sequence on each of the four bit
++			 * ranges. RX has only three of these (no MR);
++			 * TX has the extra MultipleRead field at bits
++			 * 6..7 driven from pi->183. Reading once here is
++			 * equivalent to the OEM's attach-time cache for
++			 * the same reason the RX path uses it: dma-
++			 * controller_setup always runs while TXCTL is at
++			 * silicon reset defaults (just after a fresh
++			 * bcma core reset). */
++			value = b43_dma_read(ring, B43_DMA64_TXCTL) &
++				(B43_DMA64_TXMULTIREAD_MASK |
++				 B43_DMA64_TXPREFTHRESH_MASK |
++				 B43_DMA64_TXPREFCTL_MASK |
++				 B43_DMA64_TXBURSTLEN_MASK);
++			value |= B43_DMA64_TXENABLE;
+ 			value |= (addrext << B43_DMA64_TXADDREXT_SHIFT)
+ 			    & B43_DMA64_TXADDREXT_MASK;
+ 			if (!parity)

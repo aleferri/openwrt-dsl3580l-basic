@@ -8,6 +8,7 @@ PKG_CONFIG_DEPENDS += \
 	CONFIG_PACKAGE_B43_PHY_N \
 	CONFIG_PACKAGE_B43_PHY_LP \
 	CONFIG_PACKAGE_B43_PHY_HT \
+	CONFIG_PACKAGE_B43_PHY_AC \
 	CONFIG_PACKAGE_B43_BUSES_BCMA_AND_SSB \
 	CONFIG_PACKAGE_B43_BUSES_BCMA \
 	CONFIG_PACKAGE_B43_BUSES_SSB \
@@ -21,6 +22,7 @@ config-$(CONFIG_PACKAGE_B43_PHY_G) += B43_PHY_G
 config-$(CONFIG_PACKAGE_B43_PHY_N) += B43_PHY_N
 config-$(CONFIG_PACKAGE_B43_PHY_LP) += B43_PHY_LP
 config-$(CONFIG_PACKAGE_B43_PHY_HT) += B43_PHY_HT
+config-$(CONFIG_PACKAGE_B43_PHY_AC) += B43_PHY_AC
 config-$(CONFIG_PACKAGE_B43_PIO) += B43_PIO
 config-$(CONFIG_PACKAGE_B43_DEBUG) += B43_DEBUG
 
@@ -224,7 +226,7 @@ config PACKAGE_B43_USE_BCMA
 		depends on B43_FW_SQUASH
 		default "G,N,LP" if TARGET_bcm47xx_legacy
 		default "N,HT" if TARGET_bcm47xx_mips74k
-		default "G,N,LP,HT"
+		default "G,N,LP,HT,AC"
 		help
 		  This is a comma separated list of PHY types:
 		    A  => A-PHY
@@ -333,6 +335,20 @@ config PACKAGE_B43_USE_BCMA
 		default n
 		help
 		  Currently broken.
+
+		  If unsure, say N.
+		  
+	config PACKAGE_B43_PHY_AC
+		bool "Enable support for AC-PHYs (RFC scaffolding)"
+		default n
+		help
+		  Enable support for AC-PHY. This includes the following devices:
+		  PCI: BCM4352, BCM4360, BCM43b3 (DSL-3580L 5 GHz radio)
+
+		  Currently RFC scaffolding only — probe + bring-up + 5 GHz
+		  UNII-1 OFDM 6 Mbit single-stream MVP. Out of scope for the
+		  scaffolding: HT/VHT, MIMO, real TX power calibration,
+		  40/80 MHz, UNII-2/2e/3 (DFS).
 
 		  If unsure, say N.
 

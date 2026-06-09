@@ -36,14 +36,11 @@ Then _dma_rxenable @0x10964 re-injects them on every RXCTL
 programming alongside the new RxEnable / RxOffset / AddrExt bits.
 
 These values are not constants - they are silicon reset defaults
-that vary by chip and core revision. For the BCM6362 SoC the
-defaults happen to be benign on the integrated 802.11 die. For
-BCM4352 sitting on the BCM6362 PCIe RC the defaults select a
-prefetch/burst combination that the BCM4352 silicon is designed for
-when talking to a host RC; clobbering them to zero leaves the chip
-emitting inbound descriptor fetches with no prefetch and minimum
-burst, which on this RC pairing contributes to the descriptor-fetch
-I_PC master-abort fault observed in dmesg.
+that vary by chip and core revision. Mainline b43 silently rewrites
+them to their minimum values, a register state the OEM driver never
+runs on this hardware. This patch restores the OEM-faithful
+programming; it makes no claim about which runtime fault, if any,
+the divergence causes.
 
 This patch:
   1. Adds three register-field defines in dma.h
@@ -100,12 +97,12 @@ Signed-off-by: BCM6362 bringup <bringup@example.invalid>
 +			 * @0x13e3c..0x13ea8 of the DSL-3580L OEM blob
 +			 * (SHA-256 a68a0326...) and re-injects them on
 +			 * every RXCTL programming in _dma_rxenable
-+			 * @0x10964. b43 used to clobber them to zero, so
-+			 * the DMA engine ended up doing descriptor fetches
-+			 * with no prefetch and minimum burst - on BCM4352
-+			 * over the BCM6362 PCIe RC that interacts badly
-+			 * with the inbound TLP sizing and contributes to
-+			 * the descriptor-fetch I_PC fault. Reading once
++			 * @0x10964. Mainline b43 builds RXCTL from zero,
++			 * silently rewriting these silicon configuration
++			 * fields to their minimum values - a register
++			 * state the OEM driver never runs on this chip.
++			 * Keep the reset defaults instead, matching the
++			 * OEM programming. Reading once
 +			 * here is equivalent to the OEM's attach-time
 +			 * cache because dmacontroller_setup runs while the
 +			 * register is still at reset defaults (the bcma

@@ -32,12 +32,10 @@ The four fields are silicon reset defaults; values differ by chip
 and core revision. RX has three of them (no MultipleRead);
 this patch adds the fourth.
 
-For BCM4352 sitting on the BCM6362 PCIe RC, clobbering these to
-zero leaves the TX DMA engine emitting inbound completion TLPs
-with no prefetch, no multi-read on chained descriptors, and the
-minimum burst length, which on this RC pairing contributes to
-the same descriptor-fetch master-abort fault category as the RX
-side (separately addressed by the previous patch).
+Mainline b43 silently rewrites all four to their minimum values, a
+register state the OEM driver never runs on this hardware. As with
+the RX patch, this restores the OEM-faithful programming and makes
+no claim about which runtime fault, if any, the divergence causes.
 
 This patch:
   1. Adds four register-field defines in dma.h

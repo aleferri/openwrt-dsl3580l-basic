@@ -29,7 +29,9 @@
 
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/pci.h>
 #include <linux/printk.h>
+#include <linux/swab.h>
 
 #define SHIM_BASE	0x10007000
 #define SHIM_SIZE	0x100
@@ -109,92 +111,10 @@
 
 #define TAG	"bcm6362-regdump: "
 
-/*
- * BAR1 write-enable knob and parameters.
- *
- * When write_bar1 is set at insmod time, the module programs the PCIe
- * RC bridge's BAR1 inbound translation window BEFORE running the
- * register dump - so the dump that follows shows the post-write state.
- *
- * Default values target the BCM4352 inbound DMA path on this board:
- * the 4352 emits 32-bit MEM TLPs with translation = 0x40000000 in the
- * low word of the descriptor address (see b43 patch 823), so the
- * bridge needs a match window over PCIe [0x40000000 .. 0x4fffffff]
- * remapped to DRAM [0x00000000 .. 0x0fffffff]. Encoding in the BCM
- * bridge regs uses base = top12(start) and "mask" = top12(end) (not a
- * true bitmask), so 0x400 / 0x4ff means [0x40000000 .. 0x4fffffff].
- *
- * To experiment with a different window or a different remap target
- * just pass new values at insmod time, e.g. a smaller 64 MB window:
- *   insmod bcm6362-regdump.ko write_bar1=1 bar1_mask=0x43f
- * or remapping to a non-zero DRAM offset:
- *   insmod bcm6362-regdump.ko write_bar1=1 bar1_remap=0x008
- */
-static bool write_bar1;
-module_param(write_bar1, bool, 0444);
-MODULE_PARM_DESC(write_bar1, "Program BAR1 inbound at insmod (default off)");
-
-static unsigned int bar1_base = 0x400;
-module_param(bar1_base, uint, 0444);
-MODULE_PARM_DESC(bar1_base, "BAR1 BASE field, top 12 bits of PCIe window start (default 0x400)");
-
-static unsigned int bar1_mask = 0x4ff;
-module_param(bar1_mask, uint, 0444);
-MODULE_PARM_DESC(bar1_mask, "BAR1 MASK field, top 12 bits of PCIe window end inclusive (default 0x4ff)");
-
-static unsigned int bar1_remap;
-module_param(bar1_remap, uint, 0444);
-MODULE_PARM_DESC(bar1_remap, "BAR1 REMAP target, top 12 bits of DRAM destination (default 0x000)");
-
-static bool bar1_swap;
-module_param(bar1_swap, bool, 0444);
-MODULE_PARM_DESC(bar1_swap, "Set BAR1 swap_enable bit (default off)");
-
-/*
- * CONFIG2 BAR1 SIZE field write.
- *
- * Separate from the bridge-side BAR1 BASEMASK/REMAP setup. The
- * BCM6362 PCIe RC has two distinct BAR1 layers that must BOTH be
- * configured for inbound DMA to actually land in DRAM:
- *
- *  - PCIe-side BAR1 (CONFIG2 SIZE field at offset 0x408): the RC
- *    advertises this BAR to the PCIe link as an aperture that
- *    claims a contiguous range of PCIe addresses. The OEM header
- *    says SIZE=0 means BAR1_DISABLE; non-zero values encode the
- *    size as a 4-bit code. The pcie-bcm6328.c driver clears this
- *    field to 0 after reset, which makes the RC NOT claim inbound
- *    addresses on the PCIe side - so even if the bridge BASEMASK
- *    matches, the TLP never reaches the bridge.
- *
- *  - UBUS-side bridge translation (BAR1 BASEMASK + REMAP_ADDR at
- *    +0x2830/+0x2834): for the claimed PCIe addresses, this
- *    converts them into UBUS/DRAM addresses.
- *
- * Encoding for SIZE: the pcie-bcm6318.c sibling driver defines
- * RC_BAR_CFG_LO_SIZE_256MB = 0xd (its register is at a different
- * offset because it's ubus2 architecture, but the SIZE field
- * encoding is most likely the same Broadcom IP convention). So
- * the default here is 0xd to match the 256 MB window the bridge
- * BAR1 covers. Other values are 1-byte experiments away.
- */
-static unsigned int config2_bar1_size;
-module_param(config2_bar1_size, uint, 0444);
-MODULE_PARM_DESC(config2_bar1_size, "Write CONFIG2 BAR1 SIZE field at +0x408 (0=skip, 0xd=256MB guess, range 0x0-0xf)");
-
 static void __iomem *shim_io;
 static void __iomem *cc_io;
 static void __iomem *mac_io;
 static void __iomem *pcie_io;
-
-static void dump_shim(void)
-{
-	int i;
-
-	pr_info(TAG "=== SHIM @ 0x%08x ===\n", SHIM_BASE);
-	for (i = 0; i < SHIM_SIZE; i += 4)
-		pr_info(TAG "SHIM[0x%02x] = 0x%08x\n",
-			i, ioread32be(shim_io + i));
-}
 
 static void dump_cc(void)
 {
@@ -207,6 +127,78 @@ static void dump_cc(void)
 		ioread32be(cc_io + 0x28));
 	pr_info(TAG "CC[0x2C] chipstatus   = 0x%08x\n",
 		ioread32be(cc_io + 0x2C));
+}
+
+/*
+ * Read the BCM4352 (the PCIe endpoint, NOT the on-chip radio) the way
+ * bcma does: point the BAR0 window at the backplane enumeration base
+ * and read ChipCommon through BAR0+0. PCIe is little-endian, so readl()
+ * is the correct accessor and the one bcma uses; swab32 of the same
+ * read is printed alongside so a byteswap shows up immediately. If
+ * readl gives garbage and swab32 gives a clean chipid (0x43xx) it's
+ * endianness; if both are garbage the access/window is wrong, not the
+ * byte order.
+ */
+#define WLAN_PCI_VENDOR		0x14e4
+#define WLAN_PCI_DEVICE		0x43b3
+#define BCMA_PCI_BAR0_WIN	0x80		/* cfg: backplane addr at BAR0+0 */
+#define SI_ENUM_BASE		0x18000000	/* ChipCommon backplane base */
+#define CC_EROM_PTR		0xfc		/* ChipCommon erom pointer */
+
+static void dump_pcie_dev(void)
+{
+	struct pci_dev *pdev;
+	void __iomem *bar0;
+	u32 win_save, v;
+	int i;
+
+	pdev = pci_get_device(WLAN_PCI_VENDOR, WLAN_PCI_DEVICE, NULL);
+	if (!pdev) {
+		pr_info(TAG "=== PCIe dev %04x:%04x NOT FOUND ===\n",
+			WLAN_PCI_VENDOR, WLAN_PCI_DEVICE);
+		return;
+	}
+
+	pr_info(TAG "=== PCIe dev %s [%04x:%04x] ===\n",
+		pci_name(pdev), pdev->vendor, pdev->device);
+	pr_info(TAG " BAR0 = 0x%08llx len 0x%llx   BAR2 = 0x%08llx len 0x%llx\n",
+		(u64)pci_resource_start(pdev, 0), (u64)pci_resource_len(pdev, 0),
+		(u64)pci_resource_start(pdev, 2), (u64)pci_resource_len(pdev, 2));
+
+	if (!pci_resource_start(pdev, 0)) {
+		pr_info(TAG " BAR0 unassigned, nothing to map\n");
+		pci_dev_put(pdev);
+		return;
+	}
+
+	bar0 = ioremap(pci_resource_start(pdev, 0), pci_resource_len(pdev, 0));
+	if (!bar0) {
+		pr_info(TAG " ioremap BAR0 failed\n");
+		pci_dev_put(pdev);
+		return;
+	}
+
+	/* map ChipCommon at BAR0+0, exactly like bcma_host_pci's first read */
+	pci_read_config_dword(pdev, BCMA_PCI_BAR0_WIN, &win_save);
+	pci_write_config_dword(pdev, BCMA_PCI_BAR0_WIN, SI_ENUM_BASE);
+
+	v = readl(bar0 + 0x00);
+	pr_info(TAG " CC_ID    readl=0x%08x  swab32=0x%08x  (chip=0x%04x)\n",
+		v, swab32(v), v & 0xffff);
+	pr_info(TAG " CC_CAPS  readl=0x%08x  swab32=0x%08x\n",
+		readl(bar0 + 0x04), swab32(readl(bar0 + 0x04)));
+	v = readl(bar0 + CC_EROM_PTR);
+	pr_info(TAG " EROM_PTR readl=0x%08x  swab32=0x%08x\n", v, swab32(v));
+
+	pr_info(TAG " -- BAR0+0x00 (readl | swab32) --\n");
+	for (i = 0; i < 0x40; i += 4) {
+		v = readl(bar0 + i);
+		pr_info(TAG "  +0x%02x = 0x%08x | 0x%08x\n", i, v, swab32(v));
+	}
+
+	pci_write_config_dword(pdev, BCMA_PCI_BAR0_WIN, win_save);
+	iounmap(bar0);
+	pci_dev_put(pdev);
 }
 
 /*
@@ -238,22 +230,19 @@ static void dump_mac_window(const char *label, u16 base, u16 len)
 }
 
 /*
- * PCIe Root Complex dump - inbound DMA path diagnostic.
+ * PCIe Root Complex dump - inbound DMA path observation (read-only).
  *
- * We're trying to figure out whether the BCM4352 (PCIe endpoint) is
- * hitting a configured BAR1 inbound window when it emits descriptor
- * fetches at translation=0x40000000, or whether that window is unconfigured
- * and the chip's transactions get master-aborted on the RC side - the
- * suspected cause of "Fatal DMA error: 0x00000400 (I_PC)" on phy1.
- *
- * The PcieBridgeRegs block contains BAR1 BASEMASK + REMAP ADDR registers
- * that gate which PCIe-side addresses are remapped onto UBUS/DRAM.
- *
- * We read both candidate blocks (set A at +0x800 from PCIe RC base, set B
- * at +0x2800) because the existing pcie-bcm6328.c driver writes its
- * OPT1/OPT2/BAR0_BASEMASK at +0x2820 while the OEM 6362_map_part.h
- * describes the same fields at +0x820. Only one of the two is the real
- * one on this silicon - the empirical dump tells us which.
+ * Per the blob audit (b43-add-bcm43xx-ac, kernel-patch/dma-blob-analysis):
+ * for the 4352's PCIe + DMA64 engine the descriptor/data translation is
+ * high word = 0x80000000, low word = 0, so the addresses leaving the
+ * endpoint on the link are the plain DRAM physical addresses. The reads
+ * below record the RC state those transactions meet: CONFIG2 BAR1 size,
+ * both candidate PcieBridgeRegs blocks (set A at +0x800 per the OEM
+ * 6362_map_part.h layout, set B at +0x2800 where pcie-bcm6328.c writes;
+ * empirically set B is the populated block on this silicon), and the
+ * bridge/core error latches. The most informative read is of the error
+ * latches taken right after a fatal DMA error: they record whether and
+ * how the RC handled the offending inbound transaction.
  */
 static void dump_bridge_set(const char *label, u32 set_base)
 {
@@ -319,81 +308,6 @@ static void dump_bridge_set(const char *label, u32 set_base)
 		set_base + BRIDGE_CORE_ERR_STATUS1_OFF, r);
 }
 
-/*
- * Program CONFIG2 BAR1 SIZE field. Read-modify-write that only
- * touches bits 0..3 of the register at offset 0x408; preserves all
- * other bits including the ones the pcie-bcm6328.c driver sets
- * elsewhere in CONFIG2. The dump that follows shows whether the
- * field actually latched the requested value.
- */
-static void write_pcie_config2(void)
-{
-	u32 cur, want;
-
-	cur  = __raw_readl(pcie_io + PCIE_CONFIG2_REG);
-	want = (cur & ~CONFIG2_BAR1_SIZE_MASK) | (config2_bar1_size & CONFIG2_BAR1_SIZE_MASK);
-
-	pr_info(TAG ">>> write_config2_bar1_size active <<<\n");
-	pr_info(TAG "  current  CONFIG2 = 0x%08x  bar1_size_field=0x%x\n",
-		cur, cur & CONFIG2_BAR1_SIZE_MASK);
-	pr_info(TAG "  writing  CONFIG2 = 0x%08x  bar1_size_field=0x%x\n",
-		want, want & CONFIG2_BAR1_SIZE_MASK);
-
-	__raw_writel(want, pcie_io + PCIE_CONFIG2_REG);
-
-	cur = __raw_readl(pcie_io + PCIE_CONFIG2_REG);
-	pr_info(TAG "  readback CONFIG2 = 0x%08x  bar1_size_field=0x%x  %s\n",
-		cur, cur & CONFIG2_BAR1_SIZE_MASK,
-		(cur == want) ? "(== want)" : "(MISMATCH)");
-	pr_info(TAG "<<< write_config2_bar1_size done >>>\n");
-}
-
-/*
- * Program BAR1 inbound translation. Writes BASEMASK and REMAP_ADDR
- * at the Set B locations (PCIe RC + 0x2830 / +0x2834) which the
- * regdump confirmed empirically are the populated register block on
- * this silicon. Reads back what was written and prints both, so any
- * write-through failure (wrong endianness, register that ignores the
- * write, etc.) becomes immediately visible.
- */
-static void write_pcie_bar1(void)
-{
-	u32 want_bm, want_ra, got_bm, got_ra;
-
-	want_bm = ((bar1_base & 0xfff) << BASEMASK_BASE_SHIFT) |
-		  ((bar1_mask & 0xfff) << BASEMASK_MASK_SHIFT) |
-		  BASEMASK_REMAP_EN |
-		  (bar1_swap ? BASEMASK_SWAP_EN : 0);
-	want_ra = (bar1_remap & 0xfff) << REMAP_ADDR_SHIFT;
-
-	pr_info(TAG ">>> write_bar1 active <<<\n");
-	pr_info(TAG "  PCIe inbound window: PCIe [0x%05x00000 .. 0x%05xfffff]  ->  DRAM [0x%05x00000 .. ]\n",
-		bar1_base, bar1_mask, bar1_remap);
-	pr_info(TAG "  writing  +0x%04x BAR1 BASEMASK   = 0x%08x  (base=0x%03x mask=0x%03x swap=%u remap_en=1)\n",
-		PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_BASEMASK_OFF, want_bm,
-		bar1_base & 0xfff, bar1_mask & 0xfff, bar1_swap);
-	pr_info(TAG "  writing  +0x%04x BAR1 REMAP_ADDR = 0x%08x  (addr=0x%03x)\n",
-		PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_REMAP_ADDR_OFF, want_ra,
-		bar1_remap & 0xfff);
-
-	__raw_writel(want_bm,
-		pcie_io + PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_BASEMASK_OFF);
-	__raw_writel(want_ra,
-		pcie_io + PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_REMAP_ADDR_OFF);
-
-	/* Posted-write barrier: read back to flush the store and to verify
-	 * what the silicon actually latched (in case some bits are RO or
-	 * encoded differently than we expect). */
-	got_bm = __raw_readl(pcie_io + PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_BASEMASK_OFF);
-	got_ra = __raw_readl(pcie_io + PCIE_BRIDGE_B_BASE + BRIDGE_BAR1_REMAP_ADDR_OFF);
-
-	pr_info(TAG "  readback  BAR1 BASEMASK   = 0x%08x  %s\n",
-		got_bm, (got_bm == want_bm) ? "(== want)" : "(MISMATCH)");
-	pr_info(TAG "  readback  BAR1 REMAP_ADDR = 0x%08x  %s\n",
-		got_ra, (got_ra == want_ra) ? "(== want)" : "(MISMATCH)");
-	pr_info(TAG "<<< write_bar1 done >>>\n");
-}
-
 static void dump_pcie_rc(void)
 {
 	u32 cfg2, dlst;
@@ -402,7 +316,7 @@ static void dump_pcie_rc(void)
 		PCIE_RC_BASE);
 
 	cfg2 = __raw_readl(pcie_io + PCIE_CONFIG2_REG);
-	pr_info(TAG " +0x%04x CONFIG2          = 0x%08x  bar1_size_field=0x%x (driver clobbers to 0)\n",
+	pr_info(TAG " +0x%04x CONFIG2          = 0x%08x  bar1_size_field=0x%x (cleared by pcie-bcm6328.c)\n",
 		PCIE_CONFIG2_REG, cfg2,
 		cfg2 & CONFIG2_BAR1_SIZE_MASK);
 
@@ -459,13 +373,9 @@ static int __init bcm6362_regdump_init(void)
 		goto out_unmap;
 	}
 
-	dump_shim();
+	dump_pcie_dev();
 	dump_cc();
 	dump_mac();
-	if (config2_bar1_size)
-		write_pcie_config2();
-	if (write_bar1)
-		write_pcie_bar1();
 	dump_pcie_rc();
 
 	/* Re-dump the SHIM Control/Status pairs after the MAC accesses.
